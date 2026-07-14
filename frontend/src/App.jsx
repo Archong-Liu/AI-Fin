@@ -8,6 +8,13 @@ const Svg = ({ html, className = 'chart-wrap' }) => (
 
 const VIEW_NAME = { fleet: '船隊總覽', ship: '單船分析', verify: '人工比對', data: '資料與報告' }
 
+const NAV_ICONS = {
+  fleet: <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>,
+  ship: <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 17l3 4h12l3-4M3 17l9-2 9 2M12 15V6M7 9l5-4 5 4" /></svg>,
+  verify: <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5h6a1 1 0 0 1 1 1v0a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v0a1 1 0 0 1 1-1z" /><path d="M16 6h2a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h2" /><path d="M9 13l2 2 4-4" /></svg>,
+  data: <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16" /></svg>,
+}
+
 /* ---------- 船隊總覽 ---------- */
 function FleetView({ ships, thr, setThr, onPick }) {
   const [sent, setSent] = useState(false)
@@ -440,7 +447,10 @@ export default function App() {
           <div className="title">船體能效監控台 <span className="sub">Hull Efficiency Console</span></div>
           <nav aria-label="主導航">
             {Object.entries(VIEW_NAME).map(([k, label]) => (
-              <button key={k} className={`nav ${view === k ? 'active' : ''}`} onClick={() => setView(k)}>{label}</button>
+              <button key={k} className={`nav ${view === k ? 'active' : ''}`} onClick={() => setView(k)}>
+                {NAV_ICONS[k]}
+                <span>{label}</span>
+              </button>
             ))}
           </nav>
           <button className="btn-consult" onClick={() => setDrawerOpen(o => !o)}><span className="dot" />AI 諮詢</button>
