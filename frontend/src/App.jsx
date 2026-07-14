@@ -11,9 +11,20 @@ const VIEW_NAME = { fleet: '船隊總覽', ship: '單船分析', verify: '人工
 /* ---------- 船隊總覽 ---------- */
 function FleetView({ ships, thr, setThr, onPick }) {
   const [sent, setSent] = useState(false)
+  const [filter, setFilter] = useState('all')
   const over = ships.filter(s => s.sl >= thr)
   const avgSl = ships.reduce((s, x) => s + x.sl, 0) / ships.length
   const totPenalty = over.reduce((s, x) => s + x.penalty, 0)
+  // 狀態完全由「目前警戒線」動態推導——警戒線一改，分類與數量即時重算
+  const counts = { all: ships.length, crit: 0, watch: 0, good: 0 }
+  ships.forEach(s => { counts[statusOf(s.sl, thr)]++ })
+  const CATS = [
+    { key: 'all', label: '全部' },
+    { key: 'crit', label: STATUS_TXT.crit },
+    { key: 'watch', label: STATUS_TXT.watch },
+    { key: 'good', label: STATUS_TXT.good },
+  ]
+  const shown = filter === 'all' ? ships : ships.filter(s => statusOf(s.sl, thr) === filter)
   return (
     <>
       {over.length ? (
@@ -47,24 +58,37 @@ function FleetView({ ships, thr, setThr, onPick }) {
           <div className="delta down">▼ 0.6 pt（重訓後）</div></div>
       </div>
       <h2 className="section">全船隊 Speed Loss（依嚴重度排序 · 點擊查看單船）</h2>
-      <div className="fleet">
-        {ships.map(s => {
-          const st = statusOf(s.sl, thr)
-          return (
-            <button key={s.id} className={`ship ${st}`} onClick={() => onPick(s.id)} aria-label={`查看 ${s.name}`}>
-              <div className="ship-head">
-                <span className="name">{s.name} <span className="type">{s.type}</span></span>
-                <span className={`pill ${st}`}>{STATUS_TXT[st]}</span>
-              </div>
-              <div className="row">
-                <span className="sl">{s.sl.toFixed(1)}<small> % SL</small></span>
-                <span className="pen">+{s.penalty.toFixed(1)} t/d</span>
-              </div>
-              <div className="meta">距上次清潔 {s.daysClean} 天{s.sl < thr ? ` · 緩衝約 ${bufferDays(s, thr)} 天` : ''}</div>
-              <Svg className="" html={spark(s.trend)} />
+      <div className="fleet-body">
+        <aside className="status-side" aria-label="狀態篩選">
+          {CATS.map(c => (
+            <button key={c.key} className={`status-item ${c.key} ${filter === c.key ? 'active' : ''}`}
+              onClick={() => setFilter(c.key)}>
+              {c.key !== 'all' && <span className={`fdot ${c.key === 'crit' ? 'crit' : c.key === 'watch' ? 'warn' : 'ok'}`} />}
+              <span>{c.label}</span>
+              <span className="cnt">{counts[c.key]}</span>
             </button>
-          )
-        })}
+          ))}
+        </aside>
+        <div className="fleet">
+          {shown.length === 0 && <div className="faint">此類別目前沒有船</div>}
+          {shown.map(s => {
+            const st = statusOf(s.sl, thr)
+            return (
+              <button key={s.id} className={`ship ${st}`} onClick={() => onPick(s.id)} aria-label={`查看 ${s.name}`}>
+                <div className="ship-head">
+                  <span className="name">{s.name} <span className="type">{s.type}</span></span>
+                  <span className={`pill ${st}`}>{STATUS_TXT[st]}</span>
+                </div>
+                <div className="row">
+                  <span className="sl">{s.sl.toFixed(1)}<small> % SL</small></span>
+                  <span className="pen">+{s.penalty.toFixed(1)} t/d</span>
+                </div>
+                <div className="meta">距上次清潔 {s.daysClean} 天{s.sl < thr ? ` · 緩衝約 ${bufferDays(s, thr)} 天` : ''}</div>
+                <Svg className="" html={spark(s.trend)} />
+              </button>
+            )
+          })}
+        </div>
       </div>
     </>
   )
