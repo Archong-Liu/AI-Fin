@@ -329,6 +329,43 @@ function Drawer({ open, onClose, ctx, msgs, onAsk }) {
   )
 }
 
+/* ---------- 登入 ---------- */
+// ponytail: demo 帳密寫死前端；正式版換 AWS Cognito / 後端 auth API，元件介面不變
+const DEMO_USERS = { admin: 'hullfx2026', yangming: 'demo1234' }
+
+function Login({ onLogin }) {
+  const [acc, setAcc] = useState('')
+  const [pwd, setPwd] = useState('')
+  const [err, setErr] = useState('')
+  const submit = e => {
+    e.preventDefault()
+    if (DEMO_USERS[acc.trim()] === pwd) onLogin(acc.trim())
+    else setErr('帳號或密碼錯誤，請再試一次')
+  }
+  return (
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <div className="login-logo">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 14l2 5h14l2-5M3 14l9-2 9 2M12 12V4M8 7l4-3 4 3" /></svg>
+        </div>
+        <h1>船體能效監控台</h1>
+        <div className="login-sub">Hull Efficiency Console</div>
+        <label>帳號
+          <input value={acc} autoComplete="username" autoFocus
+            onChange={e => { setAcc(e.target.value); setErr('') }} placeholder="輸入帳號" />
+        </label>
+        <label>密碼
+          <input type="password" value={pwd} autoComplete="current-password"
+            onChange={e => { setPwd(e.target.value); setErr('') }} placeholder="輸入密碼" />
+        </label>
+        {err && <div className="login-err" role="alert">{err}</div>}
+        <button type="submit" className="login-btn" disabled={!acc || !pwd}>登入</button>
+        <div className="login-hint">DEMO 帳密：admin / hullfx2026</div>
+      </form>
+    </div>
+  )
+}
+
 /* ---------- App ---------- */
 export default function App() {
   const ships = useMemo(makeShips, [])
@@ -356,6 +393,11 @@ export default function App() {
   const pick = id => { setShipId(id); setView('ship') }
 
   const [explorerOpen, setExplorerOpen] = useState(false)
+  const [user, setUser] = useState(() => localStorage.getItem('hullfx_user'))
+  const login = u => { localStorage.setItem('hullfx_user', u); setUser(u) }
+  const logout = () => { localStorage.removeItem('hullfx_user'); setUser(null) }
+
+  if (!user) return <Login onLogin={login} />
 
   return (
     <div className="app">
@@ -378,6 +420,10 @@ export default function App() {
             ))}
           </nav>
           <button className="btn-consult" onClick={() => setDrawerOpen(o => !o)}><span className="dot" />AI 諮詢</button>
+          <div className="user-chip">
+            <span className="uname">{user}</span>
+            <button onClick={logout}>登出</button>
+          </div>
         </header>
         <main className="content">
           {view === 'fleet' && <FleetView ships={ships} thr={thr} setThr={setThr} onPick={pick} />}
