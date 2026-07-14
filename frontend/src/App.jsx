@@ -331,7 +331,7 @@ function Drawer({ open, onClose, ctx, msgs, onAsk }) {
 
 /* ---------- 登入 ---------- */
 // ponytail: demo 帳密寫死前端；正式版換 AWS Cognito / 後端 auth API，元件介面不變
-const DEMO_USERS = { admin: 'hullfx2026', yangming: 'demo1234' }
+const DEMO_USERS = { admin: 'hullfx2026', yangming: 'demo1234', hahahaha: '12345678' }
 
 function Login({ onLogin }) {
   const [acc, setAcc] = useState('')
@@ -421,7 +421,11 @@ export default function App() {
           </nav>
           <button className="btn-consult" onClick={() => setDrawerOpen(o => !o)}><span className="dot" />AI 諮詢</button>
           <div className="user-chip">
-            <span className="uname">{user}</span>
+            <span className="avatar">{user[0].toUpperCase()}</span>
+            <span className="uinfo">
+              <span className="uname">{user}</span>
+              <span className="urole">岸端管理員</span>
+            </span>
             <button onClick={logout}>登出</button>
           </div>
         </header>
