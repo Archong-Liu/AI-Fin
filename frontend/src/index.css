@@ -62,11 +62,11 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
   border:1px solid var(--line-soft);border-radius:11px;padding:6px 10px 6px 7px;background:var(--panel-2);
 }
 .user-chip .avatar{
-  width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;
-  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex:none;
+  width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;flex:none;
 }
-.user-chip .uinfo{display:flex;flex-direction:column;line-height:1.25}
-.user-chip .uname{font-family:var(--font-data);font-weight:600;color:var(--text);font-size:13.5px}
+.user-chip .uinfo{display:flex;flex-direction:column;line-height:1.2}
+.user-chip .uname{font-family:var(--font-data);font-weight:800;color:var(--text);font-size:22px}
 .user-chip .urole{font-size:11px;color:var(--faint)}
 .user-chip button{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:8px;padding:6px 12px;font-size:13px}
 .user-chip button:hover{border-color:var(--crit);color:var(--crit)}
