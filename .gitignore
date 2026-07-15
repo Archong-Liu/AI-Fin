@@ -9,6 +9,7 @@ venv/
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfstate.*.backup
 *.tfvars
 !terraform.tfvars.example
 
@@ -23,6 +24,9 @@ build/
 .idea/
 *.swp
 
+# Claude Code session/worktree state
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -33,6 +37,7 @@ data/processed/
 # Environment
 .env
 .env.*
+!.env.example
 
 # Terraform archive build artifacts
 .build/

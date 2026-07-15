@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
-import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss } from './api.js'
+import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext } from './api.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -157,7 +157,7 @@ function AddShipModal({ ships, onAdd, onClose }) {
 }
 
 /* ---------- 單船分析 ---------- */
-function RecoCard({ ship }) {
+function RecoCard({ ship, onConsult }) {
   const thr = ship.thr
   const st = statusOf(ship.sl, thr)
   const dock = ship.recommendDrydock ?? (ship.cleanCount >= 3)
@@ -179,7 +179,8 @@ function RecoCard({ ship }) {
         )}
         <tr><td><b>本次清潔預期維持</b></td><td><b>約 {lifeMonths.toFixed(0)} 個月</b></td></tr>
       </tbody></table>
-      {st !== 'good' && <button className="cta">{dock ? '排入進塢評估 →' : '排入清潔計畫 →'}</button>}
+      {/* 開啟 AI 諮詢側欄，帶 want_detailed 請 Claude 產出跨部門排程建議（docs/feature-spec.md F4 v0.2） */}
+      {st !== 'good' && <button className="cta" onClick={() => onConsult(ship)}>{dock ? '排入進塢評估 →' : '排入清潔計畫 →'}</button>}
     </div>
   )
 }
@@ -187,7 +188,7 @@ function RecoCard({ ship }) {
 const SHIP_TABS = [['overview', '總覽'], ['foc', '油耗細節'], ['validate', '模型驗證']]
 const SL_RANGES = [['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
 
-function ShipView({ ships, ship, onPick, updateShip }) {
+function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
   const [tab, setTab] = useState('overview')
   const [win, setWin] = useState({ d0: 0, d1: DMAX })
   const thr = ship.thr
@@ -249,7 +250,7 @@ function ShipView({ ships, ship, onPick, updateShip }) {
           </div>
         </div>
         <div className="ship-bottom">
-          <RecoCard ship={ship} />
+          <RecoCard ship={ship} onConsult={onConsult} />
           <div className="card">
             <h3>損失歸因（模型估計）</h3>
             <div className="hint">船體汙損 vs 螺槳 vs 其他因素</div>
@@ -479,11 +480,11 @@ function DataView({ ships }) {
 }
 
 /* ---------- AI 諮詢抽屜 ---------- */
-function Drawer({ open, onClose, ctx, msgs, onAsk }) {
+function Drawer({ open, onClose, ctx, msgs, onAsk, busy }) {
   const [input, setInput] = useState('')
   const boxRef = useRef(null)
-  useEffect(() => { boxRef.current?.scrollTo(0, boxRef.current.scrollHeight) }, [msgs])
-  const send = () => { if (input.trim()) { onAsk(input.trim()); setInput('') } }
+  useEffect(() => { boxRef.current?.scrollTo(0, boxRef.current.scrollHeight) }, [msgs, busy])
+  const send = () => { if (input.trim() && !busy) { onAsk(input.trim()); setInput('') } }
   return (
     <aside className={`drawer ${open ? '' : 'closed'}`} aria-label="AI 諮詢">
       <header>
@@ -492,15 +493,21 @@ function Drawer({ open, onClose, ctx, msgs, onAsk }) {
         <div className="ctx">👁 正在追蹤：{ctx}</div>
       </header>
       <div className="msgs" ref={boxRef}>
-        {msgs.map((m, i) => <div key={i} className={`msg ${m.role}`}>{m.text}</div>)}
+        {msgs.map((m, i) => (
+          <div key={i} className={`msg ${m.role}`}>
+            {m.text}
+            {m.action && <div className="msg-action">💡 {m.action.summary}</div>}
+          </div>
+        ))}
+        {busy && <div className="msg ai pending">思考中…</div>}
       </div>
       <div className="sugs">
-        {SUGGESTIONS.map(q => <button key={q} onClick={() => onAsk(q)}>{q}</button>)}
+        {SUGGESTIONS.map(q => <button key={q} disabled={busy} onClick={() => onAsk(q)}>{q}</button>)}
       </div>
       <div className="inputbar">
-        <input value={input} placeholder="詢問 AI 顧問…" aria-label="輸入問題"
+        <input value={input} placeholder="詢問 AI 顧問…" aria-label="輸入問題" disabled={busy}
           onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} />
-        <button onClick={send}>送出</button>
+        <button onClick={send} disabled={busy}>送出</button>
       </div>
     </aside>
   )
@@ -582,9 +589,26 @@ export default function App() {
     setMsgs(m => [...m, { role: 'sys', text: `— 視圖已切換：${ctx}，AI 已同步脈絡 —` }])
   }, [ctx])
 
-  const ask = q => {
+  // 呼叫 /api/consult（見 docs/feature-spec.md F4 v0.2）；VITE_API_BASE 未設定或呼叫失敗時
+  // 退回本地示意回覆 aiAnswer()，行為與 api.js 的 fetchFleetData 多來源降級一致。
+  const [busy, setBusy] = useState(false)
+  const ask = async (q, { wantDetailed = false } = {}) => {
     setMsgs(m => [...m, { role: 'user', text: q }])
-    setTimeout(() => setMsgs(m => [...m, { role: 'ai', text: aiAnswer(q, ships, ship) }]), 350)
+    const history = msgs.filter(m => m.role === 'user' || m.role === 'ai').slice(-6)
+      .map(m => ({ role: m.role, text: m.text }))
+    setBusy(true)
+    const res = await consultAI({
+      view, question: q, history, wantDetailed,
+      shipContext: view === 'ship' ? buildShipContext(ship) : null,
+      fleetContext: view === 'fleet' ? buildFleetContext(ships, meta) : null,
+    })
+    setBusy(false)
+    if (res?.answer) setMsgs(m => [...m, { role: 'ai', text: res.answer, action: res.suggested_action }])
+    else setTimeout(() => setMsgs(m => [...m, { role: 'ai', text: aiAnswer(q, ships, ship) }]), 300)
+  }
+  const consultDetailed = s => {
+    setDrawerOpen(true)
+    ask(`請幫我針對 ${s.name} 產生跨部門排程建議（含清潔成本與航線影響評估）`, { wantDetailed: true })
   }
   const pick = id => { setShipId(id); setView('ship') }
 
@@ -630,7 +654,7 @@ export default function App() {
         </header>
         <main className="content">
           {view === 'fleet' && <FleetView ships={ships} onPick={pick} onAdd={addShip} meta={meta} />}
-          {view === 'ship' && <ShipView ships={ships} ship={ship} onPick={setShipId} updateShip={updateShip} />}
+          {view === 'ship' && <ShipView ships={ships} ship={ship} onPick={setShipId} updateShip={updateShip} onConsult={consultDetailed} />}
           {view === 'verify' && (<>
             <h2 className="section">人工比對（導入期雙軌驗證）</h2>
             <DualVerify ships={ships} />
@@ -638,7 +662,7 @@ export default function App() {
           {view === 'data' && <DataView ships={ships} />}
         </main>
       </div>
-      <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} ctx={ctx} msgs={msgs} onAsk={ask} />
+      <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} ctx={ctx} msgs={msgs} onAsk={ask} busy={busy} />
     </div>
   )
 }

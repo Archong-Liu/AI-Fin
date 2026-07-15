@@ -212,3 +212,57 @@ export function adaptSpeedLoss(sl, fleetJson) {
     },
   }
 }
+
+/* ---------- AI 諮詢（issue #F4-v0.2）：POST /api/consult ---------- */
+// HTTP API 網域與 CloudFront 不同源，走 VITE_API_BASE（build 時注入，見 frontend/.env）；
+// 未設定時直接放棄呼叫，App.jsx 退回本地示意回覆 aiAnswer()，行為與 fetchFleetData 失敗時一致。
+const API_BASE = import.meta.env.VITE_API_BASE || ''
+
+// 只送後台真實輸出的欄位給 LLM 當 context。attribution/recommendDrydock/dockRationale/
+// foulingRatePer100d 是 speed_loss.json 的真實模型輸出（見 adaptSpeedLoss）才會出現；
+// 其餘來源（daily-pct/derived/mock）沒有這些欄位就直接省略，不用前端估算值頂替，
+// 避免 LLM 把示意值當成模型正式輸出來推理。
+export function buildShipContext(ship, extra) {
+  return {
+    ship_id: ship.name, current_pct: +ship.sl.toFixed(2), thr: ship.thr,
+    days_since_cleaning: ship.daysClean, clean_count: ship.cleanCount,
+    penalty_t_per_day: +ship.penalty.toFixed(2),
+    recent_trend_pct: ship.trend.slice(-6).map(v => +v.toFixed(2)),
+    src_mode: ship.srcMode ?? 'mock',
+    attribution: ship.attribution ?? undefined,
+    fouling_rate_pct_per_100d: ship.foulingRatePer100d ?? undefined,
+    propeller_condition: ship.propellerCondition ?? undefined,
+    recommend_drydock: ship.recommendDrydock ?? undefined,
+    dock_rationale: ship.dockRationale ?? undefined,
+    ...extra,
+  }
+}
+
+export function buildFleetContext(ships, meta) {
+  const over = ships.filter(s => s.sl >= s.thr)
+  return {
+    avg_sl_pct: +(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(2),
+    total_vessels: ships.length, mape_pct: meta?.mape ?? null,
+    over_threshold: over.map(s => ({ ship_id: s.name, pct: +s.sl.toFixed(2), thr: s.thr })),
+  }
+}
+
+export async function consultAI({ view, question, history, shipContext, fleetContext, wantDetailed }) {
+  if (!API_BASE) return null
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 20000)
+    const r = await fetch(`${API_BASE}/api/consult`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({
+        view, question, history, want_detailed: !!wantDetailed,
+        ship_context: shipContext ?? undefined, fleet_context: fleetContext ?? undefined,
+      }),
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}

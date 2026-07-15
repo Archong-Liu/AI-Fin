@@ -44,6 +44,12 @@ jobs:
 
       - name: Build
         working-directory: frontend
+        env:
+          # AI consult endpoint base URL (docs/feature-spec.md F4 v0.2) -- Vite inlines
+          # this at build time. Repo variable, not a secret: it's a public API Gateway
+          # URL with open CORS (infrastructure/modules/api). Unset -> consultAI() no-ops
+          # and the drawer falls back to the local aiAnswer() stub.
+          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
         run: npm run build
 
       - name: Configure AWS credentials (OIDC)

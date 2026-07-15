@@ -49,3 +49,11 @@ output "notify_lambda_name" {
 output "ses_verified_identities" {
   value = module.notification.verified_identities
 }
+
+output "consult_url" {
+  value = module.llm.consult_url
+}
+
+output "llm_lambda_name" {
+  value = module.llm.llm_lambda_name
+}
