@@ -21,3 +21,9 @@ variable "aws_account_id" {
   type        = string
   default     = "486868043998"
 }
+
+variable "create_github_oidc_provider" {
+  description = "Create the GitHub Actions OIDC provider (set false if it already exists in the account)"
+  type        = bool
+  default     = true
+}

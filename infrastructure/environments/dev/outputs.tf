@@ -33,3 +33,7 @@ output "inference_ecr_repository_url" {
 output "inference_lambda_name" {
   value = module.data_processing.inference_lambda_name
 }
+
+output "frontend_deploy_role_arn" {
+  value = module.cicd.frontend_deploy_role_arn
+}
