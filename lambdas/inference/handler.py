@@ -53,6 +53,18 @@ MAINTENANCE_KEY = os.environ.get("MAINTENANCE_KEY", "maintenance/maintenance.csv
 # Weather-vector columns the dashboard expects; produced here if the inputs exist.
 NOON_UTC_EPOCH = pd.Timestamp("2021-01-01")
 
+# Offline cross-validation metrics of the trained model (see docs/ml-eda-and-decisions.md).
+# Surfaced in the dashboard KPI (frontend DATA_CONTRACT). Update when the model is retrained.
+VALIDATION = {
+    "event_holdout_mape_pct": 4.16,
+    "leave_one_ship_out_mape_pct": 5.33,
+    "rmse_mt_per_day": 3.5,
+}
+
+# Maintenance types that reset the hull/performance baseline (UWI is inspection-only).
+HULL_EVENTS = {"DD", "UWC", "PP", "UWC+PP", "UWI+PP"}
+DAY_MAX = 1825  # ~5-year day-index horizon
+
 
 # ============================================================== Lambda entry point
 def lambda_handler(event, context):
@@ -119,6 +131,85 @@ def submission_payload(submission: pd.DataFrame) -> dict:
     }
 
 
+# ================================================================= speed loss
+def _median(a: list) -> float:
+    s = sorted(a)
+    return s[len(s) // 2] if s else float("nan")
+
+
+def _fit_seg(days: list, vals: list) -> dict:
+    """Least-squares line over a maintenance interval -> trend segment endpoints."""
+    n = len(days)
+    sx, sy = sum(days), sum(vals)
+    sxx = sum(d * d for d in days)
+    sxy = sum(d * v for d, v in zip(days, vals))
+    den = n * sxx - sx * sx
+    b = (n * sxy - sx * sy) / den if den else 0.0
+    a = sy / n - b * (sx / n)
+    d0, d1 = days[0], days[-1]
+    return {"d0": int(d0), "d1": int(d1),
+            "p0": round(max(0.0, a + b * d0), 3), "p1": round(max(0.0, a + b * d1), 3)}
+
+
+def compute_speed_loss(g: pd.DataFrame, events: list) -> "dict | None":
+    """Backend Speed-Loss proxy (authoritative source for the dashboard's tier-1 path).
+
+    Mirrors the previously-validated frontend derivation so the numbers are consistent:
+    comparability filter (modal speed band +/-1.5kn, displacement median +/-25%),
+    Admiralty normalisation idx = foc_eq24 / (displacement^(2/3) * STW^3), a clean
+    baseline from the lowest quartile of each post-maintenance window's early days, and
+    a 7-point rolling median. Returns the DATA_CONTRACT `speed_loss` block or None when
+    a ship lacks enough comparable steady days (frontend then falls back gracefully).
+    """
+    steady = g["steady"].fillna(False) if "steady" in g else False
+    sub = g[steady & g["foc_eq24"].notna()
+            & (g["SPEED_THROUGH_WATER"] > 8) & g["DISPLACEMENT"].notna()].sort_values("day")
+    if len(sub) < 20:
+        return None
+
+    mode = sub["SPEED_THROUGH_WATER"].round().value_counts().idxmax()
+    rows = sub[(sub["SPEED_THROUGH_WATER"] - mode).abs() <= 1.5]
+    disp_med = rows["DISPLACEMENT"].median()
+    if disp_med and disp_med > 0:
+        rows = rows[((rows["DISPLACEMENT"] - disp_med).abs() / disp_med) <= 0.25]
+    if len(rows) < 20:
+        rows = sub
+    rows = rows.sort_values("day").to_dict("records")
+
+    def idx(r):
+        return r["foc_eq24"] / ((r["DISPLACEMENT"] ** (2 / 3)) * r["SPEED_THROUGH_WATER"] ** 3) * 1e9
+
+    ev_days = sorted(int(e["event_day"]) for e in events)
+    bounds = [0, *ev_days, DAY_MAX + 1]
+    points, segments = [], []
+    for bi in range(len(bounds) - 1):
+        seg = [r for r in rows if bounds[bi] <= r["day"] < bounds[bi + 1]]
+        if len(seg) < 5:
+            continue
+        idxs = [idx(r) for r in seg]
+        early = sorted(idxs[:max(5, len(seg) // 5)])
+        k = max(2, len(early) // 4)
+        base = sum(early[:k]) / k
+        if base <= 0:
+            continue
+        raw = [max(0.0, (v / base - 1) * 100) for v in idxs]
+        seg_days = [int(r["day"]) for r in seg]
+        seg_v = [_median(raw[max(0, n - 3):n + 4]) for n in range(len(seg))]
+        points.extend({"day": d, "pct": round(v, 3)} for d, v in zip(seg_days, seg_v))
+        if len(seg) >= 3:
+            segments.append(_fit_seg(seg_days, seg_v))
+
+    if len(points) < 20:
+        return None
+    current = _median([p["pct"] for p in points[-15:]])
+    return {
+        "method": "admiralty-proxy-v1",
+        "current_pct": round(current, 3),
+        "points": points,
+        "segments": segments,
+    }
+
+
 # ================================================================= fleet dataset
 def build_fleet_data(df: pd.DataFrame, mdl, submission: pd.DataFrame) -> dict:
     """Full fleet daily dataset with predicted_mt merged in, grouped per ship.
@@ -145,19 +236,28 @@ def build_fleet_data(df: pd.DataFrame, mdl, submission: pd.DataFrame) -> dict:
     for ship_id, g in df.groupby("ship", sort=True):
         g = g.sort_values("day")
         daily = json.loads(g.to_json(orient="records"))  # NaN -> null, native types
+        maint = maintenance_by_ship.get(ship_id, [])
+        hull_events = [e for e in maint
+                       if e.get("event_type") in HULL_EVENTS and e.get("event_day") is not None]
+        speed_loss = compute_speed_loss(g, hull_events)  # None if insufficient data
         ships.append({
             "ship_id": ship_id,
             "ship_type": g["ship_type"].iloc[0] if "ship_type" in g else None,
             "n_days": int(len(g)),
             "n_predictions": int(g["predict_fuel"].notna().sum()),
-            "maintenance": maintenance_by_ship.get(ship_id, []),
+            "maintenance": maint,
+            "speed_loss": speed_loss,
             "daily": daily,
         })
+
+    n_sl = sum(1 for s in ships if s["speed_loss"])
+    logger.info(f"Computed speed_loss for {n_sl}/{len(ships)} ships")
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": "physics-residual hybrid: Admiralty backbone + HistGradientBoosting",
         "target": "ME_FULLSPEED_CONSUMP_[fuel] (MT/day, full speed); foc_eq24 = VLSFO-eq/24h",
+        "validation": VALIDATION,
         "n_ships": int(df["ship"].nunique()),
         "n_rows": int(len(df)),
         "n_predictions": int(len(submission)),
