@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
-import { fetchFleetData, adaptFleet } from './api.js'
+import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss } from './api.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -39,8 +39,8 @@ function FleetView({ ships, onPick, onAdd, meta }) {
       <div className="thr-row">
         <span className="faint">
           {meta
-            ? `資料來源 fleet_data.json（${meta.generatedAt?.slice(0, 10)} 產出）· ${
-              { processed: '後台已處理 speed_loss', 'daily-pct': '後台逐日 speed_loss 欄位', derived: '前端過渡推導（待後台 speed_loss 欄位）', mixed: '混合來源' }[meta.mode]}`
+            ? `資料來源 ${meta.mode === 'iso' ? 'speed_loss.json' : 'fleet_data.json'}（${meta.generatedAt?.slice(0, 10)} 產出）· ${
+              { iso: 'ISO 19030 speed loss（正式）', 'daily-pct': '後台逐日 speed_loss 欄位', derived: '前端過渡推導（speed_loss.json 抓取失敗）', mixed: '混合來源' }[meta.mode]}`
             : '離線示意資料'}
           · 各船警戒線可於「單船分析」頁個別調整 · 超標自動通報：fleet-ops@yangming.com.tw（demo）
         </span>
@@ -160,7 +160,7 @@ function AddShipModal({ ships, onAdd, onClose }) {
 function RecoCard({ ship }) {
   const thr = ship.thr
   const st = statusOf(ship.sl, thr)
-  const dock = ship.cleanCount >= 3
+  const dock = ship.recommendDrydock ?? (ship.cleanCount >= 3)
   const lifeMonths = Math.max(2, 7 - ship.cleanCount * 1.5)
   const buf = bufferDays(ship, thr)
   const head = st === 'crit' ? (dock ? '清潔效果已遞減，建議評估進塢（DD）' : '建議儘速安排水下清潔（UWC+PP）')
@@ -168,11 +168,15 @@ function RecoCard({ ship }) {
   return (
     <div className="card reco">
       <div className="headline" style={{ color: `var(--${st})` }}>{head}</div>
+      {ship.dockRationale && <div className="hint">ISO 19030 模型依據：{ship.dockRationale}</div>}
       <table><tbody>
         <tr><td>目前 Speed Loss</td><td>{ship.sl.toFixed(1)} %</td></tr>
         <tr><td>額外油耗</td><td>{ship.penalty.toFixed(1)} t/day</td></tr>
         <tr><td>突破警戒線（{thr}%）</td><td>{ship.sl >= thr ? '已超標' : `約 ${buf} 天後`}</td></tr>
         <tr><td>累計水下清潔</td><td>{ship.cleanCount} 次</td></tr>
+        {ship.foulingRatePer100d != null && (
+          <tr><td>汙損累積速率</td><td>{ship.foulingRatePer100d.toFixed(1)} %/100天</td></tr>
+        )}
         <tr><td><b>本次清潔預期維持</b></td><td><b>約 {lifeMonths.toFixed(0)} 個月</b></td></tr>
       </tbody></table>
       {st !== 'good' && <button className="cta">{dock ? '排入進塢評估 →' : '排入清潔計畫 →'}</button>}
@@ -549,13 +553,18 @@ export default function App() {
   const addShip = f => setShips(list =>
     [...list, makeShip(f, Math.max(...list.map(s => s.id)) + 1)].sort((a, b) => b.sl - a.sl))
 
-  // issue #5：開機抓 fleet_data.json（同源 → CloudFront fallback），失敗則沿用 mock
+  // 開機抓正式資料（同源 → CloudFront fallback）：優先 speed_loss.json（ISO 19030，single source
+  // of truth），抓不到才退回 fleet_data.json 的過渡推導；都失敗則沿用 mock。
   useEffect(() => {
     let on = true
-    fetchFleetData().then(j => {
-      if (!on || !j) return
-      const { ships: real, meta: m } = adaptFleet(j)
-      if (real.length) { setShips(real); setMeta(m); setShipId(real[0].id) }
+    Promise.all([fetchSpeedLoss(), fetchFleetData()]).then(([sl, fleet]) => {
+      if (!on) return
+      const iso = sl ? adaptSpeedLoss(sl, fleet) : null
+      if (iso?.ships.length) { setShips(iso.ships); setMeta(iso.meta); setShipId(iso.ships[0].id); return }
+      if (fleet) {
+        const { ships: real, meta: m } = adaptFleet(fleet)
+        if (real.length) { setShips(real); setMeta(m); setShipId(real[0].id) }
+      }
     })
     return () => { on = false }
   }, [])
