@@ -33,3 +33,9 @@ variable "ses_email" {
   type        = string
   default     = "aaarrchong@gmail.com"
 }
+
+variable "bedrock_model_id" {
+  description = "Bedrock model/inference-profile id used for the AI consult Lambda"
+  type        = string
+  default     = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+}

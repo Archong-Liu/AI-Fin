@@ -82,12 +82,15 @@ const eventsFromIso = sl => (sl.events || [])
 function fromIso(sl) {
   const rows = (sl.history || []).filter(h => num(h.day) && num(h.speed_loss_pct))
   if (rows.length < 20) return null
-  const pts = rows.map(h => ({ d: h.day, v: Math.max(0, h.speed_loss_pct) })).sort((a, b) => a.d - b.d)
+  // roll_speed_loss_pct（30 個穩態日滾動平均，ml/speed_loss.py 算好隨 history 一起給）優先於逐日原始值：
+  // 單日殘差本身就吵（同一船前後兩天可差到 ±10pt），沒有 30 天窗口（min_periods=5）的最初幾筆才退回原始值。
+  const val = h => num(h.roll_speed_loss_pct) ? h.roll_speed_loss_pct : h.speed_loss_pct
+  const pts = rows.map(h => ({ d: h.day, v: Math.max(0, val(h)) })).sort((a, b) => a.d - b.d)
   const events = eventsFromIso(sl)
   return {
     pts, events,
     segs: fitByEvents(pts, events),
-    current: num(sl.latest?.speed_loss_pct) ? Math.max(0, sl.latest.speed_loss_pct) : null,
+    current: pts.length ? pts[pts.length - 1].v : null,
     srcMode: 'iso',
   }
 }
@@ -210,5 +213,84 @@ export function adaptSpeedLoss(sl, fleetJson) {
       mode: 'iso',
       thresholds: sl.thresholds_speed_loss_pct,
     },
+  }
+}
+
+/* ---------- AI 諮詢（issue #F4-v0.2）：POST /api/consult ---------- */
+// HTTP API 網域與 CloudFront 不同源，走 VITE_API_BASE（build 時注入，見 frontend/.env）；
+// 未設定時直接放棄呼叫，App.jsx 退回本地示意回覆 aiAnswer()，行為與 fetchFleetData 失敗時一致。
+const API_BASE = import.meta.env.VITE_API_BASE || ''
+
+// 只送後台真實輸出的欄位給 LLM 當 context。attribution/recommendDrydock/dockRationale/
+// foulingRatePer100d 是 speed_loss.json 的真實模型輸出（見 adaptSpeedLoss）才會出現；
+// 其餘來源（daily-pct/derived/mock）沒有這些欄位就直接省略，不用前端估算值頂替，
+// 避免 LLM 把示意值當成模型正式輸出來推理。
+export function buildShipContext(ship, extra) {
+  return {
+    ship_id: ship.name, current_pct: +ship.sl.toFixed(2), thr: ship.thr,
+    days_since_cleaning: ship.daysClean, clean_count: ship.cleanCount,
+    penalty_t_per_day: +ship.penalty.toFixed(2),
+    recent_trend_pct: ship.trend.slice(-6).map(v => +v.toFixed(2)),
+    src_mode: ship.srcMode ?? 'mock',
+    attribution: ship.attribution ?? undefined,
+    fouling_rate_pct_per_100d: ship.foulingRatePer100d ?? undefined,
+    propeller_condition: ship.propellerCondition ?? undefined,
+    recommend_drydock: ship.recommendDrydock ?? undefined,
+    dock_rationale: ship.dockRationale ?? undefined,
+    ...extra,
+  }
+}
+
+export function buildFleetContext(ships, meta) {
+  const over = ships.filter(s => s.sl >= s.thr)
+  return {
+    avg_sl_pct: +(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(2),
+    total_vessels: ships.length, mape_pct: meta?.mape ?? null,
+    // 帶實際算好的多燒油量，不要讓 LLM 自己用平均 SL 去猜噸數（會亂猜出不一致的數字）
+    over_threshold_extra_fuel_t_per_day: +over.reduce((s, x) => s + x.penalty, 0).toFixed(2),
+    over_threshold: over.map(s => ({ ship_id: s.name, pct: +s.sl.toFixed(2), thr: s.thr, extra_fuel_t_per_day: +s.penalty.toFixed(2) })),
+  }
+}
+
+export async function consultAI({ view, question, history, shipContext, fleetContext, wantDetailed }) {
+  if (!API_BASE) return null
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 20000)
+    const r = await fetch(`${API_BASE}/api/consult`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({
+        view, question, history, want_detailed: !!wantDetailed,
+        ship_context: shipContext ?? undefined, fleet_context: fleetContext ?? undefined,
+      }),
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+/* ---------- 通報 Email：POST /api/notify（lambdas/notify，SES） ---------- */
+// recipients 省略時 Lambda 退回 SES_RECIPIENT（sandbox 已驗證地址）；SES sandbox 下寄給未驗證
+// 地址會失敗，所以呼叫端（FleetView/DataView）不要自己塞 fleet-ops@yangming.com.tw 之類的示意地址。
+export async function sendNotify({ shipId, currentPct, daysSinceHull, note, recipients }) {
+  if (!API_BASE) return null
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 15000)
+    const r = await fetch(`${API_BASE}/api/notify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({
+        ship_id: shipId, current_pct: currentPct, days_since_hull: daysSinceHull,
+        note: note ?? undefined, recipients: recipients ?? undefined,
+      }),
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
   }
 }

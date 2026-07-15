@@ -300,87 +300,101 @@ Lambda 產出靜態 JSON 至 S3，前端透過 CloudFront 直接讀取。
 
 ---
 
-## F4: LLM 排程建議 (Bedrock Claude)
+## F4: AI 諮詢顧問 (Bedrock Claude) — v0.2 redesign
+
+> **v0.2 改版說明**：原設計是單船觸發的一次性表單 → `/api/recommend`。實際前端（`frontend/src/App.jsx`）
+> 已經做出一個**常駐、跨視圖同步脈絡的 AI 諮詢側欄**（Drawer），且其目前的示意回覆函式
+> `aiAnswer()`（`frontend/src/data.js`）的 fallback 文案本身就寫著：「正式版會把『你目前檢視的
+> 視圖 + 該船模型輸出 + 養護紀錄摘要』一起送進 Claude API」——也就是說真正的產品設計早就定案，
+> 只是尚未接上真實 LLM。本節取代原 F4，讓 spec 對齊已實作的 UI，而非另外憑空做一個表單頁。
 
 ### 概要
 
-前端使用者針對特定船舶觸發 LLM 推薦，系統組裝上下文 → invoke Bedrock → 回傳結構化建議。
+AI 諮詢側欄在船隊總覽、單船分析、人工比對、資料與報告四個視圖都常駐開啟，並會在使用者切換
+視圖/船隻時自動同步脈絡列（`👁 正在追蹤：...`）。對話請求把「目前視圖 + 使用者已經在看的資料」
+一併送給 Bedrock Claude，讓回答能引用實際數字，不需要使用者額外填表單。
+
+原 F4 表單蒐集的四個欄位（下一港口／ETA／靠泊時數／清潔成本）沒有被捨棄——它們變成單船分析頁
+`RecoCard` 的「排入清潔計畫 →」按鈕觸發的**深度建議**模式：同一支 API，多帶一個
+`want_detailed: true` 旗標，請 Claude 額外產出結構化的跨部門排程建議（含 ROI／風險評估），
+直接顯示在側欄對話中，而不是跳轉到另一個頁面。
 
 ### API
 
 ```
-POST /api/recommend
+POST /api/consult
 Content-Type: application/json
 
 Request:
 {
-  "ship_id": "S1",
-  "context": {
-    "next_port": "Kaohsiung",
-    "eta_days": 10,
-    "berth_hours": 30,
-    "cleaning_cost_usd": 45000
+  "view": "fleet" | "ship" | "verify" | "data",   // 必填，對應目前的主導航分頁
+  "question": "為什麼這艘船速度損失突然上升？",           // 必填
+  "history": [{"role": "user" | "ai", "text": "..."}], // 選填，近幾輪對話（不含本次 question）
+  "want_detailed": false,                          // 選填，RecoCard CTA 觸發時為 true
+
+  // view == "ship" 時，前端已在記憶體中的單船資料（不含前端示意生成、非後台真實輸出的欄位，
+  // 例如 attrDonut 的歸因百分比目前是前端公式估算值，故不隨 context 送出，避免 LLM 誤把示意值
+  // 當成模型正式輸出來推理）
+  "ship_context": {
+    "ship_id": "S1", "current_pct": 8.7, "thr": 8,
+    "days_since_cleaning": 180, "clean_count": 2, "penalty_t_per_day": 4.8,
+    "recent_trend_pct": [6.1, 6.4, 7.0, 7.6, 8.1, 8.7],
+    "src_mode": "processed",
+    // 僅 want_detailed 且使用者於對話中提供時才會出現：
+    "next_port": "Kaohsiung", "eta_days": 10, "berth_hours": 30, "cleaning_cost_usd": 45000
+  },
+
+  // view == "fleet" 時
+  "fleet_context": {
+    "avg_sl_pct": 6.3, "total_vessels": 15, "mape_pct": 4.2,
+    "over_threshold": [{"ship_id": "S4", "pct": 14.2, "thr": 12}, ...]
   }
 }
+```
 
+回應永遠是 200——Bedrock 逾時或輸出無法解析時，回傳的是一段降級文字而不是 5xx，前端側欄因此
+不需要另外處理錯誤狀態（與現有 `fetchFleetData()` 多來源降級的設計精神一致）：
+
+```
 Response:
 {
-  "recommendation": "CLEAN_NOW",
-  "confidence": 0.85,
-  "summary": "建議於高雄港靠泊期間安排水下清潔...",
-  "details": {
-    "for_technical_dept": "目前船體主要為藤壺及藻類附著...",
-    "for_route_planning": "靠泊時間 30 小時充裕，清潔作業約需 8-12 小時...",
-    "roi_analysis": "預估清潔後每日節省燃油 USD 3,200，投資回收期約 14 天...",
-    "risk_if_deferred": "若延遲清潔，Speed Loss 預計每月增加 2-3%..."
-  },
+  "answer": "...",                    // 一律有值，繁體中文，引用 context 中的實際數字
+  "suggested_action": {                // 由後端依 ship_context 規則決定，不是模型輸出
+    "type": "SCHEDULE_CLEANING" | "ESCALATE_DRYDOCK" | "MONITOR",
+    "ship_id": "S1",
+    "summary": "S1 目前 8.7% 已超過警戒線 8%，建議安排水下清潔"
+  } | null,
+  "detailed_recommendation": {          // 僅 want_detailed 時嘗試附上；解析失敗則為 null
+    "recommendation": "CLEAN_NOW | DEFER | MONITOR",
+    "confidence": 0.85,
+    "details": {
+      "for_technical_dept": "...", "for_route_planning": "...",
+      "roi_analysis": "...", "risk_if_deferred": "..."
+    }
+  } | null,
   "generated_at": "2025-06-15T14:30:00Z"
 }
 ```
 
-### LLM Prompt Template
+`suggested_action` 刻意用 Python 規則算（與 `RecoCard` 現有的 `st`/`dock` 判斷同一套邏輯），
+不倚賴模型輸出——側欄裡的行動 chip 因此在 Bedrock 呼叫失敗時也還能顯示，只有 `answer` 這段文字
+會降級。
 
-```
-你是陽明海運的船舶效能顧問。根據以下資料，產出跨部門排程建議。
+### 前端整合點
 
-## 船舶狀態
-- 船舶代號：{ship_id}
-- 目前 Speed Loss：{speed_loss_pct}%（{speed_loss_kts} kts）
-- 距離上次清潔：{days_since_cleaning} 天
-- 主要髒污類型：{fouling_types}
-- 髒污嚴重程度：{fouling_severity}/15
-- 螺旋槳狀態：{propeller_condition}
-- 目前主機全速油耗：{me_fullspeed_consump} MT/day（燃料：{fuel_type}）
-
-## 航線排程（使用者提供）
-- 下一靠泊港：{next_port}
-- 預計 {eta_days} 天後抵達
-- 靠泊時間：{berth_hours} 小時
-
-## 成本參考
-- 預估洗船成本：USD {cleaning_cost}
-- 因 Speed Loss 造成的每日額外燃油成本：USD {daily_fuel_penalty}
-
-## 請輸出 JSON 格式：
-{
-  "recommendation": "CLEAN_NOW | DEFER | MONITOR",
-  "confidence": 0.0-1.0,
-  "summary": "一句話建議摘要",
-  "details": {
-    "for_technical_dept": "給工務部門的技術建議",
-    "for_route_planning": "對航線排程的影響評估",
-    "roi_analysis": "投資回收期分析",
-    "risk_if_deferred": "延遲風險評估"
-  }
-}
-```
+| UI 元件 | 現況（v0.1） | 改版後 |
+|---|---|---|
+| `Drawer`（`App.jsx`） | `onAsk` 呼叫本地關鍵字比對 `aiAnswer()` | 呼叫 `consultAI()`（`api.js`），失敗才退回 `aiAnswer()` 當離線示意 |
+| `RecoCard` CTA 按鈕 | 純 UI，無 `onClick` | 開啟側欄並帶 `want_detailed: true` 送出深度建議請求 |
+| 側欄訊息 | 純文字氣泡 | AI 訊息可附一顆 `suggested_action` chip |
 
 ### 接受標準
 
 - [ ] API 回應時間 < 15 秒（含 Bedrock invoke）
-- [ ] LLM 輸出為可解析的結構化 JSON
-- [ ] 建議內容同時對工務與航線規劃部門有溝通價值
-- [ ] 錯誤處理：Bedrock timeout / malformed response 有 fallback
+- [ ] `want_detailed` 模式下 `detailed_recommendation` 為可解析的結構化 JSON；解析失敗時整體
+      回應仍是 200 且 `answer` 有可讀內容
+- [ ] 一般問答模式下 `answer` 會引用 `ship_context`/`fleet_context` 中的實際數字，而非泛泛而談
+- [ ] Bedrock timeout / malformed response 有 fallback，`suggested_action` 不受影響
 
 ---
 

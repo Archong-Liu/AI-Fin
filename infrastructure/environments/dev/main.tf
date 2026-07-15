@@ -83,6 +83,19 @@ module "notification" {
   ses_recipient     = var.ses_email
 }
 
+# --- LLM Module (AI consult via Bedrock, F4 v0.2 — docs/feature-spec.md) ---
+module "llm" {
+  source = "../../modules/llm"
+
+  project_prefix = var.project_prefix
+  environment    = var.environment
+
+  api_id            = module.api.api_id
+  api_execution_arn = module.api.api_execution_arn
+  api_endpoint      = module.api.api_endpoint
+  bedrock_model_id  = var.bedrock_model_id
+}
+
 # --- CI/CD Module (GitHub OIDC + frontend deploy role) ---
 module "cicd" {
   source = "../../modules/cicd"

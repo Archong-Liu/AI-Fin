@@ -348,6 +348,16 @@ button.ghost:hover{border-color:var(--accent);color:var(--accent)}
 .export-row{display:flex;gap:11px;margin-top:18px}
 .export-row button{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:9px;padding:10px 18px;font-size:17.4px}
 .export-row button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.export-row button:disabled{opacity:.5;cursor:not-allowed}
+
+/* 匯出 PDF＝window.print()：只印 report-doc，其餘看板外殼都藏起來 */
+@media print{
+  .rail,.explorer-panel,.topbar,.drawer,.status-side,.ship-tabs{display:none!important}
+  .content>h2.section,.content>.card:not(.report-doc),.content>.pipeline{display:none!important}
+  .content{padding:0}
+  .report-doc{box-shadow:none;border:0;max-width:none}
+  .report-doc .export-row{display:none!important}
+}
 
 /* ===== AI 諮詢抽屜 ===== */
 .drawer{
@@ -367,9 +377,12 @@ button.ghost:hover{border-color:var(--accent);color:var(--accent)}
 .msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:3px}
 .msg.ai{align-self:flex-start;background:var(--panel-2);border:1px solid var(--line-soft);border-bottom-left-radius:3px}
 .msg.sys{align-self:center;background:none;color:var(--faint);font-size:14.4px;font-family:var(--font-data);padding:2px 0}
+.msg.ai.pending{color:var(--faint);animation:pulse 1.4s infinite}
+.msg-action{margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft);font-size:15.6px;color:var(--muted)}
 .sugs{padding:0 18px 12px;display:flex;flex-wrap:wrap;gap:7px}
 .sugs button{font-size:15.6px;border:1px solid var(--line);background:var(--panel-2);color:var(--muted);border-radius:20px;padding:5px 13px}
 .sugs button:hover{border-color:var(--accent);color:var(--accent)}
+.sugs button:disabled,.inputbar input:disabled,.inputbar button:disabled{opacity:.5;cursor:not-allowed}
 .inputbar{display:flex;gap:9px;padding:14px 18px 18px;border-top:1px solid var(--line-soft)}
 .inputbar input{flex:1;border:1px solid var(--line);background:var(--ground);color:var(--text);border-radius:9px;padding:11px 14px;font-size:17.4px;font-family:inherit}
 .inputbar button{border:0;background:var(--accent);color:#fff;border-radius:9px;padding:0 18px;font-weight:600;font-size:18px}
