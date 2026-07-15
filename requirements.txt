@@ -1,0 +1,9 @@
+# Run the ETL + training pipeline locally (python ml/build_model.py).
+# Versions pinned to the training environment so a cloned repo reproduces model.joblib
+# (scikit-learn pickles are version-sensitive; the inference image must match these).
+# Python 3.13
+scikit-learn==1.6.1
+numpy==2.1.3
+pandas==2.2.3
+joblib==1.4.2
+pyarrow==19.0.0   # only needed to write processed Parquet in the S3 Lambda path

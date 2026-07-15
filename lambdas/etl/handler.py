@@ -15,8 +15,8 @@ Design notes (confirmed against EDA — see docs/ml-eda-and-decisions.md):
   baseline. Hard-filtering here would discard ~60% of usable training rows AND could
   drop rows we must serve.
 - NOON_UTC is a per-ship day index (0..~1825, ~5 years), not a timestamp. Maintenance
-  event_date (calendar) is aligned into that index via a fleet epoch (~2021-01-01),
-  so the maintenance clock uses the SAME basis on both sides.
+  is provided on the SAME integer day-index (`event_day`) and used directly; if only a
+  calendar `event_date` is available it is mapped via a fleet epoch as a fallback.
 - All maintenance-derived features use only events with event_day <= the row's day
   (no future leakage).
 """
@@ -56,8 +56,8 @@ MIN_HOURS_FULL_SPEED = 22
 # Below this many full-speed hours the per-24h fuel extrapolation (x24/h) is unreliable.
 MIN_FULLSPEED_HOURS = 4
 
-# NOON_UTC=0 maps to this fleet-wide calendar epoch (derived by aligning the calendar
-# event_date column onto the NOON_UTC day-index; ~67/77 events imply 2021-01-01 +/-3d).
+# Fallback only: if maintenance has a calendar event_date instead of the integer
+# event_day, map NOON_UTC=0 to this epoch. Approximate; prefer the event_day form.
 NOON_UTC_EPOCH = pd.Timestamp("2021-01-01")
 
 # Lower heating value (MJ/kg). Fuels are folded to VLSFO(40.2)-equivalent so the model
@@ -257,12 +257,21 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ================================================================= 7. maintenance
 def align_event_day(maintenance_df: pd.DataFrame) -> pd.DataFrame:
-    """Map calendar event_date onto the NOON_UTC day-index via the fleet epoch.
+    """Put maintenance events on the NOON_UTC day-index.
 
-    NOON_UTC is a per-ship day counter with 0 ~= NOON_UTC_EPOCH, so
-    event_day = (event_date - epoch).days puts both on the same axis.
+    Preferred: the maintenance file already carries an integer `event_day` on the
+    same per-ship day-index as NOON_UTC (the exact competition format) — used as-is.
+
+    Fallback: only a calendar `event_date` is available, so map it via the fleet epoch
+    (NOON_UTC=0 ~= NOON_UTC_EPOCH). This is approximate (the epoch is inferred), so the
+    integer `event_day` form is preferred whenever present.
     """
     mt = maintenance_df.copy()
+    if "event_day" in mt.columns:
+        mt["event_day"] = pd.to_numeric(mt["event_day"], errors="coerce")
+        mt = mt.dropna(subset=["event_day"])
+        mt["event_day"] = mt["event_day"].astype(int)
+        return mt.sort_values("event_day")
     mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
     mt = mt.dropna(subset=["event_date"])
     mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
