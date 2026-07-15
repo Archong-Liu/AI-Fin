@@ -94,8 +94,8 @@
    f. power_speed_ratio = HORSE_POWER / SPEED_THROUGH_WATER
    g. TRIM = AFTER_DRAFT - FORE_DRAFT
    h. propeller_condition_score (Good=1, Fair=2, Poor=3)
-6. Output: CSV → s3://processed/csv/{ship_id}/{date}.csv
-7. Output: Summary JSON → s3://processed/results-json/fleet-summary.json
+6. Output: Parquet → s3://processed-data/processed/{base}_cleaned_{ts}.parquet (ML-internal, dtype-preserving)
+7. Output: Summary JSON → s3://processed-data/results-json/fleet-summary.json
 ```
 
 ### 輸入 Schema
@@ -123,7 +123,7 @@ draft_fwd_m, draft_aft_m
 
 ### 輸出格式
 
-- **Processed CSV**：原始欄位 + 衍生特徵欄位
+- **Processed Parquet**：每船每日一列，原始欄位 + 衍生特徵 + foc_eq24 標的（dtype 保真，供 `model.load_processed()` 讀取）
 - **fleet-summary.json**：見 F3 規格
 
 ### 接受標準
