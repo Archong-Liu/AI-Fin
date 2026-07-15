@@ -82,11 +82,19 @@ const eventsFromIso = sl => (sl.events || [])
 function fromIso(sl) {
   const rows = (sl.history || []).filter(h => num(h.day) && num(h.speed_loss_pct))
   if (rows.length < 20) return null
-  // roll_speed_loss_pct（30 個穩態日滾動平均，ml/speed_loss.py 算好隨 history 一起給）優先於逐日原始值：
-  // 單日殘差本身就吵（同一船前後兩天可差到 ±10pt），沒有 30 天窗口（min_periods=5）的最初幾筆才退回原始值。
-  const val = h => num(h.roll_speed_loss_pct) ? h.roll_speed_loss_pct : h.speed_loss_pct
-  const pts = rows.map(h => ({ d: h.day, v: Math.max(0, val(h)) })).sort((a, b) => a.d - b.d)
   const events = eventsFromIso(sl)
+  // 段內（依養護事件切分）7 點滾動中位數去噪，鏡射 fromRawDerived 現有手法。
+  // 刻意不用後端算好的 roll_speed_loss_pct：那是整條船生涯一次滾到底、不依養護事件重新起算，
+  // 清潔後前 ~30 個穩態日的窗口仍混著清潔前的高汙損日，會顯得「清潔後 SL 反而變高」的假象
+  // ——實測 S8 day802 DD 事件後，逐日原始值已貼近 0%（-2.2～+4.9），但 roll_speed_loss_pct
+  // 還停在 6～8.5%，純屬窗口滯後，不是模型本身的問題。段內平滑則絕不跨越清潔事件邊界。
+  const raw = rows.map(h => ({ d: h.day, v: Math.max(0, h.speed_loss_pct) })).sort((a, b) => a.d - b.d)
+  const bounds = [0, ...events.map(e => e.d), DMAX + 1]
+  const pts = []
+  for (let bi = 0; bi < bounds.length - 1; bi++) {
+    const seg = raw.filter(p => p.d >= bounds[bi] && p.d < bounds[bi + 1])
+    seg.forEach((p, n) => pts.push({ d: p.d, v: median(seg.slice(Math.max(0, n - 3), n + 4).map(w => w.v)) }))
+  }
   return {
     pts, events,
     segs: fitByEvents(pts, events),
