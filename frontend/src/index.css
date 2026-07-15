@@ -259,7 +259,7 @@ svg text{font-family:var(--font-data);font-size:12px;fill:var(--faint)}
 .explorer-bar button{border:1px solid var(--line);background:var(--panel);color:var(--text);width:30px;height:26px;font-size:18px;line-height:1;padding:0}
 .explorer-bar button.txt{width:auto;padding:0 10px;font-size:15px}
 .explorer-bar button:hover{border-color:var(--accent);color:var(--accent)}
-.ship-bottom{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px;align-items:start}
+.ship-bottom{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px;align-items:start}
 @media (max-width:1100px){.ship-bottom{grid-template-columns:1fr}}
 .reco{border-left:5px solid var(--crit)}
 .reco .headline{font-size:20.4px;font-weight:700;margin-bottom:8px}
@@ -267,10 +267,6 @@ svg text{font-family:var(--font-data);font-size:12px;fill:var(--faint)}
 .reco td{padding:7px 0;border-bottom:1px dashed var(--line-soft)}
 .reco td:last-child{text-align:right;font-family:var(--font-data);font-variant-numeric:tabular-nums;font-weight:600}
 .reco .cta{margin-top:14px;width:100%;border:0;background:var(--accent);color:#fff;border-radius:9px;padding:11px 0;font-size:18.6px;font-weight:600}
-.sim-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:17.4px;color:var(--muted)}
-.sim-row b{font-family:var(--font-data);color:var(--text)}
-.sim-row input{flex:1;min-width:120px;accent-color:var(--accent)}
-.sim-stats{font-family:var(--font-data);font-size:15.6px;font-variant-numeric:tabular-nums;color:var(--muted);margin-top:8px}
 
 /* ===== 管線 ===== */
 .pipeline{display:flex;overflow-x:auto}
