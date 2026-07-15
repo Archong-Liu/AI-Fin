@@ -60,7 +60,7 @@ export const FIT_TYPES = [
   ['poly2', '二次多項式 Poly-2'],
   ['poly3', '三次多項式 Poly-3'],
   ['exp', '指數 Exponential'],
-  ['fourier', '傅立葉 Fourier×3'],
+  ['fourier', '傅立葉 DFT'],
 ]
 
 // pts:[{t,v}]（t=距區間起點天數）→ { eval, formula, r2 }；擬合失敗回 null
@@ -86,15 +86,37 @@ function fitInterval(pts, type, Tspan) {
     return { eval: ev, formula: `SL(t) = ${fmt(Math.exp(c[0]))}·e^(${fmt(c[1])}·t)`, r2: r2Of(pts, ev) }
   }
   if (type === 'fourier') {
-    if (pts.length < 9) return null
-    const w = 2 * Math.PI / Tspan
-    const basis = [() => 1]
-    for (let k = 1; k <= 3; k++) basis.push(t => Math.cos(k * w * t), t => Math.sin(k * w * t))
-    const c = lstsq(pts, basis)
-    if (!c) return null
-    const ev = t => basis.reduce((a, f, k2) => a + c[k2] * f(t), 0)
-    const harm = [1, 2, 3].map(k => `${fmt(c[2 * k - 1])}·cos(${k}ωt) + ${fmt(c[2 * k])}·sin(${k}ωt)`)
-    return { eval: ev, formula: `SL(t) = ${fmt(c[0])} + ${harm.join(' + ')}，ω = 2π/${Math.round(Tspan)}`, r2: r2Of(pts, ev) }
+    // 離散傅立葉變換：實測日不等距 → 線性內插到均勻網格 → 樸素 DFT（N=64 夠快）
+    // → 取振幅前 K 大的諧波做截斷重建（低通近似）
+    if (pts.length < 8) return null
+    const N = 64, K = 4
+    const xs = new Array(N)
+    let j = 0
+    for (let i = 0; i < N; i++) {
+      const t = Tspan * i / N
+      while (j < pts.length - 2 && pts[j + 1].t < t) j++
+      const a = pts[j], b = pts[Math.min(j + 1, pts.length - 1)]
+      xs[i] = b.t > a.t ? a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t) : a.v
+    }
+    const a0 = xs.reduce((s, x) => s + x, 0) / N
+    const comps = []
+    for (let k = 1; k <= N / 2 - 1; k++) { // X_k = Σ x_n·e^(−i2πkn/N)
+      let re = 0, im = 0
+      for (let n = 0; n < N; n++) {
+        const ang = 2 * Math.PI * k * n / N
+        re += xs[n] * Math.cos(ang); im -= xs[n] * Math.sin(ang)
+      }
+      comps.push({ k, A: 2 * Math.hypot(re, im) / N, ph: Math.atan2(im, re) })
+    }
+    const top = comps.sort((a, b) => b.A - a.A).slice(0, K).sort((a, b) => a.k - b.k)
+    const ev = t => top.reduce((s, c) => s + c.A * Math.cos(2 * Math.PI * c.k * t / Tspan + c.ph), a0)
+    const terms = top.map(c =>
+      `${fmt(c.A)}·cos(2πt/${Math.round(Tspan / c.k)} ${c.ph >= 0 ? '+' : '−'} ${Math.abs(c.ph).toFixed(2)})`)
+    return {
+      eval: ev,
+      formula: `SL(t) = ${fmt(a0)} + ${terms.join(' + ')}　｜DFT N=${N}·取振幅前 ${K} 諧波·cos 內分母＝週期（天）`,
+      r2: r2Of(pts, ev),
+    }
   }
   return null
 }
@@ -202,8 +224,6 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
   const yTicks = [0, 1, 2, 3, 4].map(g => (max / 4) * g)
   const bands = [[thr, max, 'var(--crit)'], [thr / 2, thr, 'var(--watch)'], [0, thr / 2, 'var(--good)']]
   const lastCurve = curves[curves.length - 1]
-  const stepPx = PLOT_W * xStep / span
-  const cellPy = (H - T - B) / 4
 
   // 曲線取樣成 path（只畫視窗內的部分，值 clamp ≥ 0）
   const curvePath = c => {
@@ -304,19 +324,6 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             </g>
           )
         })()}
-        {/* 比例尺（可視化「每格」）：橫＝一格 x 天數、縱＝一格 y % */}
-        <g>
-          <rect x={W - R - stepPx - 78} y={H - B - cellPy - 34} width={stepPx + 66} height={cellPy + 26}
-            fill="var(--panel)" opacity=".82" />
-          <line x1={W - R - 14 - stepPx} y1={H - B - 14} x2={W - R - 14} y2={H - B - 14} stroke="var(--muted)" strokeWidth="2" />
-          <line x1={W - R - 14 - stepPx} y1={H - B - 19} x2={W - R - 14 - stepPx} y2={H - B - 9} stroke="var(--muted)" strokeWidth="2" />
-          <line x1={W - R - 14} y1={H - B - 19} x2={W - R - 14} y2={H - B - 9} stroke="var(--muted)" strokeWidth="2" />
-          <text x={W - R - 14 - stepPx / 2} y={H - B - 22} textAnchor="middle" style={{ fill: 'var(--muted)' }}>{xStep} 天</text>
-          <line x1={W - R - 28 - stepPx} y1={H - B - 14} x2={W - R - 28 - stepPx} y2={H - B - 14 - cellPy} stroke="var(--muted)" strokeWidth="2" />
-          <line x1={W - R - 33 - stepPx} y1={H - B - 14} x2={W - R - 23 - stepPx} y2={H - B - 14} stroke="var(--muted)" strokeWidth="2" />
-          <line x1={W - R - 33 - stepPx} y1={H - B - 14 - cellPy} x2={W - R - 23 - stepPx} y2={H - B - 14 - cellPy} stroke="var(--muted)" strokeWidth="2" />
-          <text x={W - R - 38 - stepPx} y={H - B - 14 - cellPy / 2 + 4} textAnchor="end" style={{ fill: 'var(--muted)' }}>{(max / 4).toFixed(1)}%</text>
-        </g>
         {vpts.map(p => (
           <circle key={`h${p.d}`} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="8" fill="transparent" style={{ cursor: 'pointer' }}
             onPointerDown={e => e.stopPropagation()}
