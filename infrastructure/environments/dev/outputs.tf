@@ -17,3 +17,19 @@ output "reports_bucket" {
 output "cloudfront_domain" {
   value = module.data_store.cloudfront_domain_name
 }
+
+output "ecr_repository_url" {
+  value = module.data_processing.ecr_repository_url
+}
+
+output "etl_lambda_name" {
+  value = module.data_processing.etl_lambda_name
+}
+
+output "inference_ecr_repository_url" {
+  value = module.data_processing.inference_ecr_repository_url
+}
+
+output "inference_lambda_name" {
+  value = module.data_processing.inference_lambda_name
+}

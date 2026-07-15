@@ -15,3 +15,9 @@ variable "environment" {
   type        = string
   default     = "dev"
 }
+
+variable "aws_account_id" {
+  description = "AWS account ID (for constructing the ECR image URI)"
+  type        = string
+  default     = "486868043998"
+}

@@ -87,4 +87,4 @@ cat docs/feature-spec.md
 
 ## License
 
-Private — Yang Ming Marine Transport Corp.
+2026 AWS Summit Hackathon

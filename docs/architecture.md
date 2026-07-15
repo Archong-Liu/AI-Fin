@@ -38,7 +38,7 @@ YMINSIGHT 是陽明海運船隊的智慧效能監控與排程協調系統。
 │                                                                             │
 │   ┌─────────────────────┐         ┌─────────────────────────────────┐      │
 │   │  S3: raw-data       │         │  S3: processed-data             │      │
-│   │  └─ noon-reports/   │         │  ├─ csv/                        │      │
+│   │  └─ noon-reports/   │         │  ├─ processed/ (parquet)                        │      │
 │   │     └─ *.csv        │         │  └─ results-json/               │      │
 │   └──────────┬──────────┘         │     ├─ fleet-summary.json       │      │
 │              │                    │     ├─ {ship_id}/latest.json    │      │
@@ -208,8 +208,8 @@ S3: raw-data/noon-reports/*.csv
      ▼
 Lambda: ML_Pipeline (ML 小組)
      │
-     ├─→ S3: processed-data/csv/{ship_id}/
-     │       (清洗後 tabular data)
+     ├─→ S3: processed-data/processed/*.parquet
+     │       (清洗後 tabular data, ML-internal)
      │
      └─→ S3: processed-data/results-json/
              ├─ fleet-summary.json
@@ -268,9 +268,11 @@ API Gateway → Lambda:Report → S3:reports/
 | Stage | Format | Reason |
 |-------|--------|--------|
 | Raw input | CSV | 正午報告原始格式 |
-| Processed (tabular) | CSV | 規模小、debug 方便、無需額外 dependency |
+| Processed (tabular) | **Parquet** | ML-internal 中間產物，由 `model.load_processed()` 直接讀取；保留 dtype（categorical、nullable int、NaN 語意），CSV 會遺失或強制轉型導致模型需重新 cast |
 | Dashboard consumption | JSON | 前端直接 fetch、支援巢狀結構 |
 | Report output | JSON | 結構化，可被前端渲染 |
+
+> **設計註記（Parquet vs CSV）**：初版設計原訂 processed 用 CSV（考量人工可讀性與 debug）。ML pipeline（PR #2）確定後，processed 檔實際上是 **ETL → 模型的內部交接產物**，並非給人或前端直接消費——Dashboard 一律讀 `results-json/`。因此改採 Parquet：`pyarrow` 已在 ETL 容器映像內，且 dtype 保真對模型正確性至關重要。CSV 原本的「易於人工檢視」理由在此不適用。
 
 ---
 
@@ -317,7 +319,7 @@ CloudFront Distribution
 | Level | Data | Protection |
 |-------|------|-----------|
 | Confidential | Raw voyage data | S3 SSE-S3 encryption |
-| Internal | Processed CSV/JSON, Speed Loss results | S3 SSE-S3, CloudFront OAI access only |
+| Internal | Processed Parquet/JSON, Speed Loss results | S3 SSE-S3, CloudFront OAI access only |
 | Public | Frontend static assets | CloudFront distribution |
 
 ### Access Control Principles
