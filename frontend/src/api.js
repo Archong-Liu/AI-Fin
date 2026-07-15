@@ -82,12 +82,15 @@ const eventsFromIso = sl => (sl.events || [])
 function fromIso(sl) {
   const rows = (sl.history || []).filter(h => num(h.day) && num(h.speed_loss_pct))
   if (rows.length < 20) return null
-  const pts = rows.map(h => ({ d: h.day, v: Math.max(0, h.speed_loss_pct) })).sort((a, b) => a.d - b.d)
+  // roll_speed_loss_pct（30 個穩態日滾動平均，ml/speed_loss.py 算好隨 history 一起給）優先於逐日原始值：
+  // 單日殘差本身就吵（同一船前後兩天可差到 ±10pt），沒有 30 天窗口（min_periods=5）的最初幾筆才退回原始值。
+  const val = h => num(h.roll_speed_loss_pct) ? h.roll_speed_loss_pct : h.speed_loss_pct
+  const pts = rows.map(h => ({ d: h.day, v: Math.max(0, val(h)) })).sort((a, b) => a.d - b.d)
   const events = eventsFromIso(sl)
   return {
     pts, events,
     segs: fitByEvents(pts, events),
-    current: num(sl.latest?.speed_loss_pct) ? Math.max(0, sl.latest.speed_loss_pct) : null,
+    current: pts.length ? pts[pts.length - 1].v : null,
     srcMode: 'iso',
   }
 }
@@ -243,7 +246,9 @@ export function buildFleetContext(ships, meta) {
   return {
     avg_sl_pct: +(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(2),
     total_vessels: ships.length, mape_pct: meta?.mape ?? null,
-    over_threshold: over.map(s => ({ ship_id: s.name, pct: +s.sl.toFixed(2), thr: s.thr })),
+    // 帶實際算好的多燒油量，不要讓 LLM 自己用平均 SL 去猜噸數（會亂猜出不一致的數字）
+    over_threshold_extra_fuel_t_per_day: +over.reduce((s, x) => s + x.penalty, 0).toFixed(2),
+    over_threshold: over.map(s => ({ ship_id: s.name, pct: +s.sl.toFixed(2), thr: s.thr, extra_fuel_t_per_day: +s.penalty.toFixed(2) })),
   }
 }
 
@@ -257,6 +262,29 @@ export async function consultAI({ view, question, history, shipContext, fleetCon
       body: JSON.stringify({
         view, question, history, want_detailed: !!wantDetailed,
         ship_context: shipContext ?? undefined, fleet_context: fleetContext ?? undefined,
+      }),
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+/* ---------- 通報 Email：POST /api/notify（lambdas/notify，SES） ---------- */
+// recipients 省略時 Lambda 退回 SES_RECIPIENT（sandbox 已驗證地址）；SES sandbox 下寄給未驗證
+// 地址會失敗，所以呼叫端（FleetView/DataView）不要自己塞 fleet-ops@yangming.com.tw 之類的示意地址。
+export async function sendNotify({ shipId, currentPct, daysSinceHull, note, recipients }) {
+  if (!API_BASE) return null
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 15000)
+    const r = await fetch(`${API_BASE}/api/notify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({
+        ship_id: shipId, current_pct: currentPct, days_since_hull: daysSinceHull,
+        note: note ?? undefined, recipients: recipients ?? undefined,
       }),
     })
     clearTimeout(t)

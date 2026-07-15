@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
-import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext } from './api.js'
+import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify } from './api.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -19,19 +19,36 @@ const NAV_ICONS = {
 
 /* ---------- 船隊總覽 ---------- */
 function FleetView({ ships, onPick, onAdd, meta }) {
-  const [sent, setSent] = useState(false)
+  const [notifyState, setNotifyState] = useState('idle') // idle | sending | sent | partial | error
   const [filter, setFilter] = useState('crit') // 永遠鎖定一個分類，沒有「全部」視圖
   const [adding, setAdding] = useState(false)
   const over = ships.filter(s => s.sl >= s.thr)
   const avgSl = ships.reduce((s, x) => s + x.sl, 0) / ships.length
   const totPenalty = over.reduce((s, x) => s + x.penalty, 0)
   const shown = ships.filter(s => statusOf(s.sl, s.thr) === filter)
+  // 逐船寄送（notify Lambda 一次只處理一艘船，見 lambdas/notify/handler.py）；不帶 recipients
+  // 走 Lambda 預設的 SES_RECIPIENT（sandbox 已驗證地址），banner 文案的示意收件人不會真的收到。
+  const sendAlerts = async () => {
+    setNotifyState('sending')
+    const results = await Promise.all(over.map(s => sendNotify({
+      shipId: s.name, currentPct: +s.sl.toFixed(1), daysSinceHull: s.daysClean,
+      note: s.dockRationale ?? undefined,
+    })))
+    const okCount = results.filter(r => r?.sent).length
+    setNotifyState(okCount === results.length ? 'sent' : okCount > 0 ? 'partial' : 'error')
+  }
+  const NOTIFY_LABEL = {
+    idle: '立即寄送通報 Email', sending: '寄送中…',
+    sent: '已寄送 ✓', partial: '部分寄送成功 ⚠', error: '寄送失敗，點擊重試',
+  }
   return (
     <>
       {over.length ? (
         <div className="banner crit" role="alert">
           ⚠ {over.length} 艘船超過各自警戒線：{over.map(s => `${s.name}（≥${s.thr}%）`).join('、')}
-          <button disabled={sent} onClick={() => setSent(true)}>{sent ? '已寄送 ✓（demo）' : '立即寄送通報 Email'}</button>
+          <button disabled={notifyState === 'sending' || notifyState === 'sent'} onClick={sendAlerts}>
+            {NOTIFY_LABEL[notifyState]}
+          </button>
         </div>
       ) : (
         <div className="banner ok">✓ 全船隊皆在各自警戒線以內</div>
@@ -429,7 +446,56 @@ function ExplorerPanel() {
   )
 }
 
-function DataView({ ships }) {
+function DataView({ ships, meta }) {
+  const avgSl = ships.reduce((s, x) => s + x.sl, 0) / ships.length
+  const overShips = ships.filter(s => s.sl >= s.thr)
+  const totPenalty = overShips.reduce((s, x) => s + x.penalty, 0)
+  const mape = meta?.mape ?? 4.2
+  const staticSummary = `本月全船隊平均 Speed Loss 為 ${avgSl.toFixed(1)}%。${overShips.length} 艘船舶超過各自警戒線，估計每日合計多燒 ${totPenalty.toFixed(1)} t 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 ${mape.toFixed(1)}%。`
+
+  // ①摘要用真實 Bedrock 呼叫產生（docs/feature-spec.md F4 v0.2），失敗/未設 VITE_API_BASE
+  // 就停在 staticSummary（同一組真實數字，只是沒有 AI 潤飾）——與其餘 AI 功能同一套降級邏輯。
+  const [aiSummary, setAiSummary] = useState(null)
+  const [aiBusy, setAiBusy] = useState(false)
+  useEffect(() => {
+    let on = true
+    setAiBusy(true)
+    consultAI({
+      view: 'data',
+      question: '請根據以上船隊資料撰寫一段月報摘要（繁體中文，3-4 句話，不要條列），需引用平均 Speed Loss、超標船數、估計每日多燒油量、模型 MAPE 這幾個數字，語氣正式，給岸端管理層看。',
+      fleetContext: buildFleetContext(ships, meta),
+    }).then(res => { if (on) { setAiSummary(res?.answer ?? null); setAiBusy(false) } })
+    return () => { on = false }
+  }, [ships, meta])
+
+  const [notifyState, setNotifyState] = useState('idle')
+  const sendToEngineering = async () => {
+    setNotifyState('sending')
+    const targets = overShips.length ? overShips.slice(0, 5) : ships.slice(0, 1)
+    const results = await Promise.all(targets.map(s => sendNotify({
+      shipId: s.name, currentPct: +s.sl.toFixed(1), daysSinceHull: s.daysClean,
+      note: aiSummary ?? s.dockRationale ?? undefined,
+    })))
+    setNotifyState(results.some(r => r?.sent) ? 'sent' : 'error')
+  }
+
+  const exportMarkdown = () => {
+    const rows = ships.slice(0, 5).map(s => {
+      const st = statusOf(s.sl, s.thr)
+      const act = st === 'crit' ? (s.cleanCount >= 3 ? '評估進塢' : '安排清潔') : st === 'watch' ? '觀察' : '—'
+      return `| ${s.name} | ${s.sl.toFixed(1)}% | ${s.penalty.toFixed(1)} t/d | ${act} | ${s.sl >= s.thr ? '已超標' : `${bufferDays(s, s.thr)} 天`} |`
+    }).join('\n')
+    const md = `# 船隊船體能效月報\n\n## 摘要\n\n${aiSummary ?? staticSummary}\n\n` +
+      `## 優先處理建議\n\n| 船名 | Speed Loss | 額外油耗 | 建議 | 調度緩衝期 |\n|---|---|---|---|---|\n${rows}\n\n` +
+      `## 模型依據\n\n基準油耗模型以良好天氣航段（風力 ≤ 4 級、全速 ≥ 22 小時）訓練，比對養護事件前後之速度–油耗曲線位移，分離船體汙損與螺槳因素。\n`
+    const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
+    const a = document.createElement('a')
+    a.href = url; a.download = 'fleet-report.md'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const NOTIFY_LABEL = { idle: '寄送給輪機部門', sending: '寄送中…', sent: '已寄送 ✓', error: '寄送失敗，點擊重試' }
+
   return (
     <div>
         <h2 className="section">每日正午報表 · 自動接收</h2>
@@ -449,9 +515,9 @@ function DataView({ ships }) {
         <h2 className="section">AI 報告</h2>
         <div className="card report-doc">
           <h1>船隊船體能效月報 — D1825</h1>
-          <div className="meta">模型版本 hull-fx v0.3（示意）· 全數字均為 DEMO 佔位值</div>
+          <div className="meta">模型版本 hull-fx v0.3 · {aiSummary ? 'AI 摘要（Bedrock Claude）' : 'AI 摘要未啟用，顯示系統計算摘要'}</div>
           <h4>① 摘要</h4>
-          <p>本月全船隊平均 Speed Loss 為 <b>{(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(1)}%</b>。<b>{ships.filter(s => s.sl >= s.thr).length} 艘</b>船舶超過各自警戒線，估計每日合計多燒 <b>{ships.filter(s => s.sl >= s.thr).reduce((s, x) => s + x.penalty, 0).toFixed(1)} t</b> 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 <b>4.2%</b>。</p>
+          <p>{aiBusy && !aiSummary ? 'AI 摘要生成中…' : (aiSummary ?? staticSummary)}</p>
           <h4>② 優先處理建議</h4>
           <table>
             <thead><tr><th>船名</th><th>Speed Loss</th><th>額外油耗</th><th>建議</th><th>調度緩衝期</th></tr></thead>
@@ -470,9 +536,11 @@ function DataView({ ships }) {
           <h4>③ 模型依據</h4>
           <p>基準油耗模型以良好天氣航段（風力 ≤ 4 級、全速 ≥ 22 小時）訓練，比對養護事件前後之速度–油耗曲線位移，分離船體汙損與螺槳因素。</p>
           <div className="export-row">
-            <button className="primary">匯出 PDF</button>
-            <button>匯出 Markdown</button>
-            <button>寄送給輪機部門</button>
+            <button className="primary" onClick={() => window.print()}>匯出 PDF</button>
+            <button onClick={exportMarkdown}>匯出 Markdown</button>
+            <button onClick={sendToEngineering} disabled={notifyState === 'sending' || notifyState === 'sent'}>
+              {NOTIFY_LABEL[notifyState]}
+            </button>
           </div>
         </div>
     </div>
@@ -659,7 +727,7 @@ export default function App() {
             <h2 className="section">人工比對（導入期雙軌驗證）</h2>
             <DualVerify ships={ships} />
           </>)}
-          {view === 'data' && <DataView ships={ships} />}
+          {view === 'data' && <DataView ships={ships} meta={meta} />}
         </main>
       </div>
       <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} ctx={ctx} msgs={msgs} onAsk={ask} busy={busy} />
