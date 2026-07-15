@@ -37,9 +37,15 @@ export function dailySeries(ship) {
 
 // slChart 已改由 SlExplorer.jsx（可拖拉/縮放的互動元件）取代
 
+// D1825 = 今日，往回推算實際日期（demo 對齊 noon_reports 2021–2025）
+export const dateOf = d => {
+  const t = new Date(Date.now() - (1825 - d) * 86400000)
+  return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
+}
+
 export function focChart(ship) {
   setSeed(2000 + ship.id)
-  const days = 30, W = 680, H = 190, L = 38, B = 22, T = 10, R = 8
+  const days = 30, W = 980, H = 280, L = 68, B = 58, T = 16, R = 16
   const base = [], act = []
   for (let d = 0; d < days; d++) { const b = 52 + rnd() * 6; base.push(b); act.push(b * (1 + ship.sl / 100) + (rnd() - 0.5) * 2) }
   const max = Math.max(...act) * 1.08, min = Math.min(...base) * 0.92
@@ -53,9 +59,23 @@ export function focChart(ship) {
       fill="${over ? 'var(--crit)' : 'var(--accent)'}" opacity="${over ? '.75' : '.55'}"/>`
   }
   const line = base.map((v, i) => `${i ? 'L' : 'M'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join('')
-  let labels = ''
-  for (let g = 0; g <= 3; g++) { const val = min + ((max - min) / 3) * g, y = py(val); labels += `<text x="${L - 6}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}</text>` }
-  labels += `<text x="${L}" y="${H - 5}">近 30 個航行日 · t/day</text>`
+  let labels = `<text transform="rotate(-90 12 ${(T + H - B) / 2})" x="12" y="${(T + H - B) / 2}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">Daily FOC（t/day）</text>`
+  for (let g = 0; g <= 3; g++) {
+    const val = min + ((max - min) / 3) * g, y = py(val)
+    labels += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
+      <text x="28" y="${y + 4}" style="fill:var(--text);font-weight:600">${val.toFixed(0)}</text>`
+  }
+  // 橫軸：日期 + D 天（近 30 個航行日，尾端對齊 D1825＝今日）
+  ;[0, 7, 14, 21, 29].forEach(i => {
+    const day = 1825 - (days - 1) + i
+    const anchor = i === 29 ? 'end' : 'middle' // 最右刻度靠右對齊，避免日期被裁切
+    labels += `<line x1="${px(i)}" y1="${H - B}" x2="${px(i)}" y2="${H - B + 5}" stroke="var(--chart-grid)"/>
+      <text x="${px(i)}" y="${H - B + 19}" text-anchor="${anchor}">${dateOf(day)}</text>
+      <text x="${px(i)}" y="${H - B + 34}" text-anchor="${anchor}" style="fill:var(--faint)">D${day}</text>`
+  })
+  labels += `<text x="${L + (W - L - R) / 2}" y="${H - 6}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">日期（D = 資料起算第幾天）· 近 30 個良好天氣航行日</text>`
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗對比">${bars}<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"/>${labels}</svg>`
 }
 

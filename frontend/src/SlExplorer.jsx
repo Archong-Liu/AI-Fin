@@ -2,19 +2,13 @@
 // 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/傅立葉），點曲線看公式與 R²。
 // 資料一律走 useShipSeries（api.js 銜接層產出），mock 船才用 charts.js 產生器。
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { dailySeries } from './charts.js'
+import { dailySeries, dateOf } from './charts.js'
 import { statusOf, STATUS_TXT, CONFIG } from './data.js'
 
 export const DMAX = 1825
 const MIN_WIN = 60
 const W = 980, H = 430, L = 80, B = 58, T = 16, R = 30
 const PLOT_W = W - L - R
-
-// D1825 = 今日，往回推算實際日期（demo 對齊 noon_reports 2021–2025）
-const dateOf = d => {
-  const t = new Date(Date.now() - (DMAX - d) * 86400000)
-  return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
-}
 
 function useShipSeries(ship) {
   const [series, setSeries] = useState(() => ship.series ?? dailySeries(ship))
@@ -278,13 +272,16 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             <text x={L - 8} y={py(v) + 4} textAnchor="end">{v.toFixed(1)}%</text>
           </g>
         ))}
-        {xTicks.map(d => (
-          <g key={d}>
-            <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 5} stroke="var(--chart-grid)" />
-            <text x={px(d)} y={H - B + 19} textAnchor="middle">{dateOf(d)}</text>
-            <text x={px(d)} y={H - B + 34} textAnchor="middle" style={{ fill: 'var(--faint)' }}>D{d}</text>
-          </g>
-        ))}
+        {xTicks.map(d => {
+          const anchor = px(d) > W - R - 40 ? 'end' : 'middle' // 貼近右緣的刻度靠右對齊，避免日期被裁切
+          return (
+            <g key={d}>
+              <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 5} stroke="var(--chart-grid)" />
+              <text x={px(d)} y={H - B + 19} textAnchor={anchor}>{dateOf(d)}</text>
+              <text x={px(d)} y={H - B + 34} textAnchor={anchor} style={{ fill: 'var(--faint)' }}>D{d}</text>
+            </g>
+          )
+        })}
         <rect x={L} y={T} width={PLOT_W} height={Math.max(0, py(thr) - T)} fill="var(--crit)" opacity=".05" />
         <line x1={L} x2={W - R} y1={py(thr)} y2={py(thr)} stroke="var(--crit)" strokeDasharray="5 4" />
         <text x={W - R - 4} y={py(thr) - 6} textAnchor="end" style={{ fill: 'var(--crit)' }}>警戒線 {thr}%</text>
@@ -292,13 +289,21 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
           const yTop = py(Math.min(v1, max))
           return <rect key={i} x={W - 20} y={yTop} width="10" height={Math.max(0, py(v0) - yTop)} fill={c} opacity=".35" />
         })}
-        {vevents.map(e => (
-          <g key={e.d}>
-            <line x1={px(e.d)} x2={px(e.d)} y1={T} y2={H - B} stroke="var(--faint)" strokeDasharray="3 4" />
-            <text x={px(e.d) + 4} y={T + 12}>{e.label}</text>
-          </g>
-        ))}
-        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="1.9" fill="var(--accent)" opacity=".35" />)}
+        {(() => {
+          // 相鄰事件（畫面距離近）標籤上下交替錯開，避免疊字
+          let prevX = -Infinity, prevLift = 0
+          return vevents.map(e => {
+            const lift = px(e.d) - prevX < 96 ? (prevLift === 0 ? 16 : 0) : 0
+            prevX = px(e.d); prevLift = lift
+            return (
+              <g key={e.d}>
+                <line x1={px(e.d)} x2={px(e.d)} y1={T} y2={H - B} stroke="var(--faint)" strokeDasharray="3 4" />
+                <text x={px(e.d) + 4} y={T + 12 + lift}>{e.label}</text>
+              </g>
+            )
+          })
+        })()}
+        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="2.7" fill="var(--text)" opacity=".85" />)}
         {curves.map((c, i) => {
           const d = curvePath(c)
           if (!d) return null
