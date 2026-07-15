@@ -37,9 +37,15 @@ export function dailySeries(ship) {
 
 // slChart 已改由 SlExplorer.jsx（可拖拉/縮放的互動元件）取代
 
+// D1825 = 今日，往回推算實際日期（demo 對齊 noon_reports 2021–2025）
+export const dateOf = d => {
+  const t = new Date(Date.now() - (1825 - d) * 86400000)
+  return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
+}
+
 export function focChart(ship) {
   setSeed(2000 + ship.id)
-  const days = 30, W = 680, H = 190, L = 38, B = 22, T = 10, R = 8
+  const days = 30, W = 980, H = 280, L = 68, B = 58, T = 16, R = 16
   const base = [], act = []
   for (let d = 0; d < days; d++) { const b = 52 + rnd() * 6; base.push(b); act.push(b * (1 + ship.sl / 100) + (rnd() - 0.5) * 2) }
   const max = Math.max(...act) * 1.08, min = Math.min(...base) * 0.92
@@ -53,9 +59,23 @@ export function focChart(ship) {
       fill="${over ? 'var(--crit)' : 'var(--accent)'}" opacity="${over ? '.75' : '.55'}"/>`
   }
   const line = base.map((v, i) => `${i ? 'L' : 'M'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join('')
-  let labels = ''
-  for (let g = 0; g <= 3; g++) { const val = min + ((max - min) / 3) * g, y = py(val); labels += `<text x="${L - 6}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}</text>` }
-  labels += `<text x="${L}" y="${H - 5}">近 30 個航行日 · t/day</text>`
+  let labels = `<text transform="rotate(-90 12 ${(T + H - B) / 2})" x="12" y="${(T + H - B) / 2}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">Daily FOC（t/day）</text>`
+  for (let g = 0; g <= 3; g++) {
+    const val = min + ((max - min) / 3) * g, y = py(val)
+    labels += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
+      <text x="28" y="${y + 4}" style="fill:var(--text);font-weight:600">${val.toFixed(0)}</text>`
+  }
+  // 橫軸：日期 + D 天（近 30 個航行日，尾端對齊 D1825＝今日）
+  ;[0, 7, 14, 21, 29].forEach(i => {
+    const day = 1825 - (days - 1) + i
+    const anchor = i === 29 ? 'end' : 'middle' // 最右刻度靠右對齊，避免日期被裁切
+    labels += `<line x1="${px(i)}" y1="${H - B}" x2="${px(i)}" y2="${H - B + 5}" stroke="var(--chart-grid)"/>
+      <text x="${px(i)}" y="${H - B + 19}" text-anchor="${anchor}">${dateOf(day)}</text>
+      <text x="${px(i)}" y="${H - B + 34}" text-anchor="${anchor}" style="fill:var(--faint)">D${day}</text>`
+  })
+  labels += `<text x="${L + (W - L - R) / 2}" y="${H - 6}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">日期（D = 資料起算第幾天）· 近 30 個良好天氣航行日</text>`
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗對比">${bars}<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"/>${labels}</svg>`
 }
 
@@ -76,42 +96,64 @@ export function attrDonut(ship) {
       <span style="color:var(--faint)">●</span> 其他 ${other.toFixed(0)}%</div>`
 }
 
-export function waterfall(ship) {
-  const extra = ship.penalty, base = 52.0, total = base + extra
-  const items = [
-    { n: '風阻', v: extra * 0.10, c: 'var(--faint)' },
-    { n: '吃水', v: extra * 0.08, c: 'var(--faint)' },
-    { n: '船體汙損', v: extra * 0.65, c: 'var(--crit)' },
-    { n: '螺槳', v: extra * 0.17, c: 'var(--watch)' },
+// 每日油耗歸因 — 成分堆疊柱狀圖（乾淨基準+風阻+吃水+船體汙損+螺槳＝當日實測 FOC）
+export function stackedFoc(ship) {
+  setSeed(3000 + ship.id)
+  const days = 14, W = 980, H = 330, L = 68, B = 58, T = 42, R = 16
+  const COMP = [
+    ['乾淨基準', 'var(--accent)', '.5'],
+    ['風阻', '#8CA0B2', '.9'],
+    ['吃水', '#B9C7D2', '.9'],
+    ['船體汙損', 'var(--crit)', '.9'],
+    ['螺槳', 'var(--watch)', '.9'],
   ]
-  const W = 640, H = 230, L = 42, B = 40, T = 16, R = 10
-  const yMin = Math.floor(base - 2), yMax = total + Math.max(0.8, extra * 0.15)
-  const py = v => T + (1 - (v - yMin) / (yMax - yMin)) * (H - T - B)
-  const n = items.length + 2, gap = (W - L - R) / n, bw = gap * 0.55
-  const bx = i => L + gap * i + gap * 0.5 - bw / 2
-  let svg = '', cum = base
-  for (let g = 0; g <= 3; g++) {
-    const val = yMin + ((yMax - yMin) / 3) * g, y = py(val)
-    svg += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
-    <text x="${L - 6}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}</text>`
+  const extra = ship.penalty
+  const rows = []
+  for (let d = 0; d < days; d++) {
+    rows.push([
+      52 + rnd() * 4 - 2,
+      extra * (0.08 + rnd() * 0.05),
+      extra * (0.06 + rnd() * 0.04),
+      extra * (0.60 + rnd() * 0.12),
+      extra * (0.14 + rnd() * 0.06),
+    ])
   }
-  svg += `<rect x="${bx(0)}" y="${py(base)}" width="${bw}" height="${H - B - py(base)}" fill="var(--accent)" opacity=".55" rx="2"/>
-    <text x="${bx(0) + bw / 2}" y="${H - B + 14}" text-anchor="middle">乾淨基準</text>
-    <text x="${bx(0) + bw / 2}" y="${py(base) - 5}" text-anchor="middle" style="fill:var(--text)">${base.toFixed(1)}</text>`
-  items.forEach((it, i) => {
-    const y0 = py(cum + it.v), h = Math.max(2, py(cum) - y0)
-    svg += `<line x1="${bx(i) + bw}" y1="${py(cum)}" x2="${bx(i + 1)}" y2="${py(cum)}" stroke="var(--faint)" stroke-dasharray="2 3"/>
-      <rect x="${bx(i + 1)}" y="${y0}" width="${bw}" height="${h}" fill="${it.c}" opacity=".85" rx="2"/>
-      <text x="${bx(i + 1) + bw / 2}" y="${H - B + 14}" text-anchor="middle">${it.n}</text>
-      <text x="${bx(i + 1) + bw / 2}" y="${y0 - 5}" text-anchor="middle" style="fill:var(--text)">+${it.v.toFixed(1)}</text>`
-    cum += it.v
+  const max = Math.max(...rows.map(p => p.reduce((a, b) => a + b, 0))) * 1.1
+  const px = i => L + ((i + 0.5) / days) * (W - L - R)
+  const bw = (W - L - R) / days * 0.58
+  const py = v => T + (1 - v / max) * (H - T - B)
+  let svg = `<text transform="rotate(-90 12 ${(T + H - B) / 2})" x="12" y="${(T + H - B) / 2}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">FOC（t/day）</text>`
+  for (let g = 0; g <= 4; g++) {
+    const val = (max / 4) * g, y = py(val)
+    svg += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
+      <text x="28" y="${y + 4}" style="fill:var(--text);font-weight:600">${val.toFixed(0)}</text>`
+  }
+  rows.forEach((parts, i) => {
+    let cum = 0
+    parts.forEach((v, k) => {
+      const y0 = py(cum + v)
+      svg += `<rect x="${(px(i) - bw / 2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}"
+        height="${(py(cum) - y0).toFixed(1)}" fill="${COMP[k][1]}" opacity="${COMP[k][2]}"/>`
+      cum += v
+    })
   })
-  svg += `<line x1="${bx(items.length) + bw}" y1="${py(cum)}" x2="${bx(n - 1)}" y2="${py(cum)}" stroke="var(--faint)" stroke-dasharray="2 3"/>
-    <rect x="${bx(n - 1)}" y="${py(total)}" width="${bw}" height="${H - B - py(total)}" fill="var(--accent)" rx="2"/>
-    <text x="${bx(n - 1) + bw / 2}" y="${H - B + 14}" text-anchor="middle">實測 FOC</text>
-    <text x="${bx(n - 1) + bw / 2}" y="${py(total) - 5}" text-anchor="middle" style="fill:var(--text)">${total.toFixed(1)}</text>
-    <text x="${L}" y="${H - 4}">單位 t/day · y 軸自 ${yMin} 起（截斷）</text>`
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="FOC 歸因瀑布圖">${svg}</svg>`
+  ;[0, 3, 6, 9, 13].forEach(i => {
+    const day = 1825 - (days - 1) + i
+    const anchor = i === 13 ? 'end' : 'middle'
+    svg += `<line x1="${px(i)}" y1="${H - B}" x2="${px(i)}" y2="${H - B + 5}" stroke="var(--chart-grid)"/>
+      <text x="${px(i)}" y="${H - B + 19}" text-anchor="${anchor}">${dateOf(day)}</text>
+      <text x="${px(i)}" y="${H - B + 34}" text-anchor="${anchor}" style="fill:var(--faint)">D${day}</text>`
+  })
+  let lx = L
+  COMP.forEach(([name, color, op]) => { // 圖例列（左上）
+    svg += `<rect x="${lx}" y="10" width="13" height="13" fill="${color}" opacity="${op}"/>
+      <text x="${lx + 18}" y="21" style="fill:var(--text)">${name}</text>`
+    lx += 18 + name.length * 13 + 26
+  })
+  svg += `<text x="${L + (W - L - R) / 2}" y="${H - 6}" text-anchor="middle"
+    style="fill:var(--muted);font-weight:600">日期（D = 資料起算第幾天）· 近 ${days} 個良好天氣航行日</text>`
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗成分堆疊圖">${svg}</svg>`
 }
 
 export function scatterChart() {
@@ -140,34 +182,3 @@ export function mapeBars(ships) {
       <span style="font-family:var(--font-data);font-size:13.2px;width:38px;text-align:right">${r.m.toFixed(1)}%</span></div>`).join('')
 }
 
-export function simChart(ship, cleanDay) {
-  const days = 120, p0 = ship.penalty
-  const a = [0], b = [0]; let ca = 0, cb = 0
-  for (let t = 1; t <= days; t++) {
-    ca += p0 * (1 + 0.004 * t)
-    cb += t < cleanDay ? p0 * (1 + 0.004 * t) : p0 * 0.15 * (1 + 0.006 * (t - cleanDay))
-    a.push(ca); b.push(cb)
-  }
-  const net = ca - cb
-  const W = 400, H = 230, L = 48, B = 24, T = 14, R = 10
-  const max = Math.max(a[days], b[days]) * 1.06 || 1
-  const px = t => L + (t / days) * (W - L - R)
-  const py = v => T + (1 - v / max) * (H - T - B)
-  const line = arr => arr.map((v, t) => `${t ? 'L' : 'M'}${px(t).toFixed(1)},${py(v).toFixed(1)}`).join('')
-  let svg = ''
-  for (let g = 0; g <= 3; g++) {
-    const val = (max / 3) * g, y = py(val)
-    svg += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
-      <text x="${L - 6}" y="${y + 3}" text-anchor="end">${Math.round(val)} t</text>`
-  }
-  ;[30, 60, 90, 120].forEach(d => { svg += `<text x="${px(d)}" y="${H - 6}" text-anchor="middle">${d}天</text>` })
-  svg += `<line x1="${px(cleanDay)}" y1="${T}" x2="${px(cleanDay)}" y2="${H - B}" stroke="var(--faint)" stroke-dasharray="3 4"/>
-    <text x="${px(cleanDay) + 4}" y="${T + 10}">清潔日</text>
-    <path d="${line(a)}" fill="none" stroke="var(--crit)" stroke-width="2"/>
-    <path d="${line(b)}" fill="none" stroke="var(--good)" stroke-width="2"/>
-    <text x="${W - R}" y="${T + 10}" text-anchor="end"><tspan style="fill:var(--crit)">— 不清潔</tspan><tspan style="fill:var(--good)" dx="10">— 於第${cleanDay}天清潔</tspan></text>`
-  return {
-    svg: `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="清潔排程模擬">${svg}</svg>`,
-    stats: `於第 ${cleanDay} 天清潔：120 天可少燒 ${Math.round(net)} t（越早清、省越多）`,
-  }
-}

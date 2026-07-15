@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
-import { spark, focChart, attrDonut, waterfall, scatterChart, mapeBars, simChart } from './charts.js'
+import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
 import { fetchFleetData, adaptFleet } from './api.js'
 
@@ -184,12 +184,10 @@ const SHIP_TABS = [['overview', '總覽'], ['foc', '油耗細節'], ['validate',
 const SL_RANGES = [['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
 
 function ShipView({ ships, ship, onPick, updateShip }) {
-  const [simDay, setSimDay] = useState(14)
   const [tab, setTab] = useState('overview')
   const [win, setWin] = useState({ d0: 0, d1: DMAX })
   const thr = ship.thr
   const st = statusOf(ship.sl, thr)
-  const sim = simChart(ship, simDay)
   return (
     <>
       <div className="ship-tabs" role="tablist">
@@ -253,16 +251,6 @@ function ShipView({ ships, ship, onPick, updateShip }) {
             <div className="hint">船體汙損 vs 螺槳 vs 其他因素</div>
             <Svg className="donut-row" html={attrDonut(ship)} />
           </div>
-          <div className="card">
-            <h3>清潔排程模擬器</h3>
-            <div className="hint">拖動滑桿假設清潔日，比較未來 120 天累積額外燃油</div>
-            <div className="sim-row">
-              <label htmlFor="simSlider">第 <b>{simDay}</b> 天清潔</label>
-              <input id="simSlider" type="range" min="5" max="60" value={simDay} onChange={e => setSimDay(+e.target.value)} />
-            </div>
-            <Svg html={sim.svg} />
-            <div className="sim-stats">{sim.stats}</div>
-          </div>
         </div>
       </>}
       {tab === 'foc' && <>
@@ -271,17 +259,10 @@ function ShipView({ ships, ship, onPick, updateShip }) {
           <div className="hint">柱狀＝實測 FOC（t/day）；藍線＝模型預測之乾淨船體基準；兩者差距即汙損造成的額外油耗</div>
           <Svg html={focChart(ship)} />
         </div>
-        <div className="pipeline mt">
-          <div className="step"><div className="no">STAGE 1</div><div className="nm">良好天氣航段篩選</div><div className="ds">風力 ≤4 Bft · 全速 ≥22h</div></div>
-          <div className="step"><div className="no">STAGE 2</div><div className="nm">乾淨基準擬合</div><div className="ds">養護後 30 天窗口<br />速度–油耗曲線回歸</div></div>
-          <div className="step"><div className="no">STAGE 3</div><div className="nm">偏移量計算</div><div className="ds">實測 FOC − 基準 FOC</div></div>
-          <div className="step"><div className="no">STAGE 4</div><div className="nm">衰退曲線分解</div><div className="ds">船體 / 螺槳 / 其他<br />對齊養護事件時間軸</div></div>
-          <div className="step"><div className="no">STAGE 5</div><div className="nm">輸出</div><div className="ds">Speed Loss % · 歸因 · 建議</div></div>
-        </div>
-        <div className="card mt" style={{ maxWidth: 860 }}>
-          <h3>單日油耗歸因 — 瀑布圖（{ship.name} · D1800）</h3>
-          <div className="hint">乾淨船體基準 + 各因素增量 = 當日實測 FOC；紅色＝船體汙損（本案焦點）</div>
-          <Svg html={waterfall(ship)} />
+        <div className="card mt">
+          <h3>每日油耗歸因 — 成分堆疊（{ship.name} · 近 14 個航行日）</h3>
+          <div className="hint">每根柱＝當日實測 FOC 的組成：乾淨基準 + 風阻 + 吃水 + 船體汙損 + 螺槳；紅色＝船體汙損（本案焦點）</div>
+          <Svg html={stackedFoc(ship)} />
         </div>
       </>}
       {tab === 'validate' && (

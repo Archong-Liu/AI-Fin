@@ -2,19 +2,13 @@
 // 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/傅立葉），點曲線看公式與 R²。
 // 資料一律走 useShipSeries（api.js 銜接層產出），mock 船才用 charts.js 產生器。
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { dailySeries } from './charts.js'
+import { dailySeries, dateOf } from './charts.js'
 import { statusOf, STATUS_TXT, CONFIG } from './data.js'
 
 export const DMAX = 1825
 const MIN_WIN = 60
 const W = 980, H = 430, L = 80, B = 58, T = 16, R = 30
 const PLOT_W = W - L - R
-
-// D1825 = 今日，往回推算實際日期（demo 對齊 noon_reports 2021–2025）
-const dateOf = d => {
-  const t = new Date(Date.now() - (DMAX - d) * 86400000)
-  return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
-}
 
 function useShipSeries(ship) {
   const [series, setSeries] = useState(() => ship.series ?? dailySeries(ship))
@@ -74,8 +68,8 @@ function fitInterval(pts, type, Tspan) {
     if (!c) return null
     const ev = t => c.reduce((a, ck, k) => a + ck * u(t) ** k, 0)
     const a = c.map((ck, k) => ck / Tspan ** k) // 換回 t 係數供顯示
-    const terms = a.map((ak, k) => k === 0 ? `${fmt(ak)}` : `${fmt(ak)}·t${k > 1 ? `^${k}` : ''}`)
-    return { eval: ev, formula: `SL(t) = ${terms.join(' + ')}`, r2: r2Of(pts, ev) }
+    const expr = a.map((ak, k) => k === 0 ? { t: 'num', v: ak } : { t: 'pow', coef: ak, pow: k })
+    return { eval: ev, expr, r2: r2Of(pts, ev) }
   }
   if (type === 'exp') {
     const pos = pts.filter(p => p.v > 0.05)
@@ -83,7 +77,7 @@ function fitInterval(pts, type, Tspan) {
     const c = lstsq(pos.map(p => ({ t: p.t, v: Math.log(p.v) })), [() => 1, t => t])
     if (!c) return null
     const ev = t => Math.exp(c[0] + c[1] * t)
-    return { eval: ev, formula: `SL(t) = ${fmt(Math.exp(c[0]))}·e^(${fmt(c[1])}·t)`, r2: r2Of(pts, ev) }
+    return { eval: ev, expr: [{ t: 'exp', a: Math.exp(c[0]), b: c[1] }], r2: r2Of(pts, ev) }
   }
   if (type === 'fourier') {
     // 離散傅立葉變換：實測日不等距 → 線性內插到均勻網格 → 樸素 DFT（N=64 夠快）
@@ -110,15 +104,40 @@ function fitInterval(pts, type, Tspan) {
     }
     const top = comps.sort((a, b) => b.A - a.A).slice(0, K).sort((a, b) => a.k - b.k)
     const ev = t => top.reduce((s, c) => s + c.A * Math.cos(2 * Math.PI * c.k * t / Tspan + c.ph), a0)
-    const terms = top.map(c =>
-      `${fmt(c.A)}·cos(2πt/${Math.round(Tspan / c.k)} ${c.ph >= 0 ? '+' : '−'} ${Math.abs(c.ph).toFixed(2)})`)
-    return {
-      eval: ev,
-      formula: `SL(t) = ${fmt(a0)} + ${terms.join(' + ')}　｜DFT N=${N}·取振幅前 ${K} 諧波·cos 內分母＝週期（天）`,
-      r2: r2Of(pts, ev),
-    }
+    const expr = [{ t: 'num', v: a0 },
+      ...top.map(c => ({ t: 'cos', A: c.A, period: Math.round(Tspan / c.k), phase: c.ph }))]
+    return { eval: ev, expr, r2: r2Of(pts, ev) }
   }
   return null
+}
+
+/* ===== 公式排版：結構化項次 → 數學式（分數疊排/上標/係數上色，不用外部庫） ===== */
+function Formula({ expr }) {
+  const lead = (i, v) => i === 0
+    ? (v < 0 ? <span className="op">−</span> : null)
+    : <span className="op">{v < 0 ? '−' : '+'}</span>
+  return (
+    <span className="formula">
+      <i>SL(t)</i><span className="op">=</span>
+      {expr.map((e, i) => {
+        if (e.t === 'num') return <span className="term" key={i}>{lead(i, e.v)}<b>{fmt(Math.abs(e.v))}</b></span>
+        if (e.t === 'pow') return (
+          <span className="term" key={i}>{lead(i, e.coef)}<b>{fmt(Math.abs(e.coef))}</b>·<i>t</i>{e.pow > 1 && <sup>{e.pow}</sup>}</span>
+        )
+        if (e.t === 'exp') return (
+          <span className="term" key={i}>{lead(i, e.a)}<b>{fmt(Math.abs(e.a))}</b>·<span className="fn">e</span><sup>{fmt(e.b)}·t</sup></span>
+        )
+        if (e.t === 'cos') return (
+          <span className="term" key={i}>
+            {lead(i, e.A)}<b>{fmt(Math.abs(e.A))}</b>·<span className="fn">cos</span>(
+            <span className="frac"><span>2π<i>t</i></span><span>{e.period}</span></span>
+            <span className="op">{e.phase < 0 ? '−' : '+'}</span>{Math.abs(e.phase).toFixed(2)})
+          </span>
+        )
+        return null
+      })}
+    </span>
+  )
 }
 
 export default function SlExplorer({ ship, thr, win, setWin }) {
@@ -259,7 +278,7 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>
             <button onClick={() => setSelCurve(null)} aria-label="關閉">×</button>
           </div>
-          <code>{selCurve.formula}</code>
+          <div className="formula-row"><Formula expr={selCurve.expr} /></div>
         </div>
       )}
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
@@ -278,13 +297,16 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             <text x={L - 8} y={py(v) + 4} textAnchor="end">{v.toFixed(1)}%</text>
           </g>
         ))}
-        {xTicks.map(d => (
-          <g key={d}>
-            <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 5} stroke="var(--chart-grid)" />
-            <text x={px(d)} y={H - B + 19} textAnchor="middle">{dateOf(d)}</text>
-            <text x={px(d)} y={H - B + 34} textAnchor="middle" style={{ fill: 'var(--faint)' }}>D{d}</text>
-          </g>
-        ))}
+        {xTicks.map(d => {
+          const anchor = px(d) > W - R - 40 ? 'end' : 'middle' // 貼近右緣的刻度靠右對齊，避免日期被裁切
+          return (
+            <g key={d}>
+              <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 5} stroke="var(--chart-grid)" />
+              <text x={px(d)} y={H - B + 19} textAnchor={anchor}>{dateOf(d)}</text>
+              <text x={px(d)} y={H - B + 34} textAnchor={anchor} style={{ fill: 'var(--faint)' }}>D{d}</text>
+            </g>
+          )
+        })}
         <rect x={L} y={T} width={PLOT_W} height={Math.max(0, py(thr) - T)} fill="var(--crit)" opacity=".05" />
         <line x1={L} x2={W - R} y1={py(thr)} y2={py(thr)} stroke="var(--crit)" strokeDasharray="5 4" />
         <text x={W - R - 4} y={py(thr) - 6} textAnchor="end" style={{ fill: 'var(--crit)' }}>警戒線 {thr}%</text>
@@ -292,13 +314,21 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
           const yTop = py(Math.min(v1, max))
           return <rect key={i} x={W - 20} y={yTop} width="10" height={Math.max(0, py(v0) - yTop)} fill={c} opacity=".35" />
         })}
-        {vevents.map(e => (
-          <g key={e.d}>
-            <line x1={px(e.d)} x2={px(e.d)} y1={T} y2={H - B} stroke="var(--faint)" strokeDasharray="3 4" />
-            <text x={px(e.d) + 4} y={T + 12}>{e.label}</text>
-          </g>
-        ))}
-        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="1.9" fill="var(--accent)" opacity=".35" />)}
+        {(() => {
+          // 相鄰事件（畫面距離近）標籤上下交替錯開，避免疊字
+          let prevX = -Infinity, prevLift = 0
+          return vevents.map(e => {
+            const lift = px(e.d) - prevX < 96 ? (prevLift === 0 ? 16 : 0) : 0
+            prevX = px(e.d); prevLift = lift
+            return (
+              <g key={e.d}>
+                <line x1={px(e.d)} x2={px(e.d)} y1={T} y2={H - B} stroke="var(--faint)" strokeDasharray="3 4" />
+                <text x={px(e.d) + 4} y={T + 12 + lift}>{e.label}</text>
+              </g>
+            )
+          })
+        })()}
+        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="2" fill="var(--text)" opacity=".8" />)}
         {curves.map((c, i) => {
           const d = curvePath(c)
           if (!d) return null
