@@ -1,26 +1,102 @@
-// 互動式 Speed Loss 主圖：左右拖曳平移、滾輪/按鈕縮放（股票圖式操作）。
-// 資料一律走 useShipSeries，後台 API 就緒後只改該 hook，繪圖不動。
-import React, { useState, useEffect, useRef } from 'react'
+// 互動式 Speed Loss 主圖：拖曳平移、滾輪/按鈕縮放、底部時間軸捲動條、
+// 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/傅立葉），點曲線看公式與 R²。
+// 資料一律走 useShipSeries（api.js 銜接層產出），mock 船才用 charts.js 產生器。
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { dailySeries } from './charts.js'
 import { statusOf, STATUS_TXT, CONFIG } from './data.js'
 
 export const DMAX = 1825
 const MIN_WIN = 60
-const W = 980, H = 340, L = 46, B = 26, T = 14, R = 30
+const W = 980, H = 430, L = 80, B = 58, T = 16, R = 30
 const PLOT_W = W - L - R
-
-function useShipSeries(ship) {
-  // 真實資料：api.js 的 adaptFleet 已把 fleet_data.json 轉成 ship.series；mock 船才用產生器
-  const [series, setSeries] = useState(() => ship.series ?? dailySeries(ship))
-  useEffect(() => { setSeries(ship.series ?? dailySeries(ship)) }, [ship])
-  // 資料每 60s 會在 CloudFront 更新（issue #5）；要即時刷新時在 App 層重抓 fleet_data.json 即可
-  return series
-}
 
 // D1825 = 今日，往回推算實際日期（demo 對齊 noon_reports 2021–2025）
 const dateOf = d => {
   const t = new Date(Date.now() - (DMAX - d) * 86400000)
   return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
+}
+
+function useShipSeries(ship) {
+  const [series, setSeries] = useState(() => ship.series ?? dailySeries(ship))
+  useEffect(() => { setSeries(ship.series ?? dailySeries(ship)) }, [ship])
+  return series
+}
+
+/* ===== 擬合核心：廣義最小二乘（basis 線性組合 + 高斯消去） ===== */
+function lstsq(pts, basis) {
+  const m = basis.length
+  const A = Array.from({ length: m }, () => new Array(m + 1).fill(0))
+  for (const p of pts) {
+    const phi = basis.map(f => f(p.t))
+    for (let i = 0; i < m; i++) {
+      A[i][m] += phi[i] * p.v
+      for (let k = 0; k < m; k++) A[i][k] += phi[i] * phi[k]
+    }
+  }
+  for (let c = 0; c < m; c++) { // 部分選主元
+    let piv = c
+    for (let r2 = c + 1; r2 < m; r2++) if (Math.abs(A[r2][c]) > Math.abs(A[piv][c])) piv = r2
+    if (Math.abs(A[piv][c]) < 1e-12) return null
+    ;[A[c], A[piv]] = [A[piv], A[c]]
+    for (let r2 = 0; r2 < m; r2++) {
+      if (r2 === c) continue
+      const f = A[r2][c] / A[c][c]
+      for (let k = c; k <= m; k++) A[r2][k] -= f * A[c][k]
+    }
+  }
+  return A.map((row, i) => row[m] / row[i])
+}
+
+const r2Of = (pts, ev) => {
+  const mean = pts.reduce((a, p) => a + p.v, 0) / pts.length
+  let sr = 0, st = 0
+  pts.forEach(p => { sr += (p.v - ev(p.t)) ** 2; st += (p.v - mean) ** 2 })
+  return st > 1e-9 ? Math.max(0, 1 - sr / st) : 1
+}
+const fmt = x => Math.abs(x) >= 1e4 || (x !== 0 && Math.abs(x) < 1e-3) ? x.toExponential(2) : +x.toPrecision(3)
+
+export const FIT_TYPES = [
+  ['linear', '線性 Linear'],
+  ['poly2', '二次多項式 Poly-2'],
+  ['poly3', '三次多項式 Poly-3'],
+  ['exp', '指數 Exponential'],
+  ['fourier', '傅立葉 Fourier×3'],
+]
+
+// pts:[{t,v}]（t=距區間起點天數）→ { eval, formula, r2 }；擬合失敗回 null
+function fitInterval(pts, type, Tspan) {
+  const u = t => t / Tspan // 多項式用正規化時間避免數值病態
+  if (type === 'linear' || type === 'poly2' || type === 'poly3') {
+    const deg = type === 'linear' ? 1 : type === 'poly2' ? 2 : 3
+    if (pts.length < deg + 2) return null
+    const basis = Array.from({ length: deg + 1 }, (_, k) => t => u(t) ** k)
+    const c = lstsq(pts, basis)
+    if (!c) return null
+    const ev = t => c.reduce((a, ck, k) => a + ck * u(t) ** k, 0)
+    const a = c.map((ck, k) => ck / Tspan ** k) // 換回 t 係數供顯示
+    const terms = a.map((ak, k) => k === 0 ? `${fmt(ak)}` : `${fmt(ak)}·t${k > 1 ? `^${k}` : ''}`)
+    return { eval: ev, formula: `SL(t) = ${terms.join(' + ')}`, r2: r2Of(pts, ev) }
+  }
+  if (type === 'exp') {
+    const pos = pts.filter(p => p.v > 0.05)
+    if (pos.length < 4) return null
+    const c = lstsq(pos.map(p => ({ t: p.t, v: Math.log(p.v) })), [() => 1, t => t])
+    if (!c) return null
+    const ev = t => Math.exp(c[0] + c[1] * t)
+    return { eval: ev, formula: `SL(t) = ${fmt(Math.exp(c[0]))}·e^(${fmt(c[1])}·t)`, r2: r2Of(pts, ev) }
+  }
+  if (type === 'fourier') {
+    if (pts.length < 9) return null
+    const w = 2 * Math.PI / Tspan
+    const basis = [() => 1]
+    for (let k = 1; k <= 3; k++) basis.push(t => Math.cos(k * w * t), t => Math.sin(k * w * t))
+    const c = lstsq(pts, basis)
+    if (!c) return null
+    const ev = t => basis.reduce((a, f, k2) => a + c[k2] * f(t), 0)
+    const harm = [1, 2, 3].map(k => `${fmt(c[2 * k - 1])}·cos(${k}ωt) + ${fmt(c[2 * k])}·sin(${k}ωt)`)
+    return { eval: ev, formula: `SL(t) = ${fmt(c[0])} + ${harm.join(' + ')}，ω = 2π/${Math.round(Tspan)}`, r2: r2Of(pts, ev) }
+  }
+  return null
 }
 
 export default function SlExplorer({ ship, thr, win, setWin }) {
@@ -30,9 +106,26 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
   const trackRef = useRef(null)
   const tdrag = useRef(null)
   const [dragging, setDragging] = useState(false)
-  const [sel, setSel] = useState(null) // 被點選的資料點
-  const { segs, events, pts } = useShipSeries(ship)
-  useEffect(() => { setSel(null) }, [ship])
+  const [sel, setSel] = useState(null)        // 被點選的資料點
+  const [fitType, setFitType] = useState('linear')
+  const [selCurve, setSelCurve] = useState(null) // 被點選的趨勢曲線
+  const { events, pts } = useShipSeries(ship)
+  useEffect(() => { setSel(null); setSelCurve(null) }, [ship, fitType])
+
+  // 每個養護區間各自擬合使用者選的函數
+  const curves = useMemo(() => {
+    const bounds = [0, ...events.map(e => e.d), DMAX + 1]
+    const out = []
+    for (let bi = 0; bi < bounds.length - 1; bi++) {
+      const seg = pts.filter(p => p.d >= bounds[bi] && p.d < bounds[bi + 1])
+      if (seg.length < 4) continue
+      const d0 = seg[0].d, d1 = seg[seg.length - 1].d
+      const f = fitInterval(seg.map(p => ({ t: p.d - d0, v: p.v })), fitType, Math.max(1, d1 - d0))
+        ?? fitInterval(seg.map(p => ({ t: p.d - d0, v: p.v })), 'linear', Math.max(1, d1 - d0))
+      if (f) out.push({ ...f, d0, d1, n: seg.length })
+    }
+    return out
+  }, [pts, events, fitType])
 
   const span = win.d1 - win.d0
   const clampWin = (d0, d1) => {
@@ -64,7 +157,6 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
   }
   const onPointerUp = () => { drag.current = null; setDragging(false) }
 
-  // 底部時間軸捲動條：拖 thumb 平移視窗、點軌道跳到該處
   const thumbDown = e => {
     e.stopPropagation()
     tdrag.current = { x: e.clientX, w: { ...win } }
@@ -96,58 +188,87 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
     return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
-  // 視窗裁切：跨界趨勢段線性內插
-  const vsegs = segs.filter(s => s.d1 > win.d0 && s.d0 < win.d1).map(s => {
-    const vAt = d => s.v0 + (s.v1 - s.v0) * (d - s.d0) / (s.d1 - s.d0)
-    const d0 = Math.max(s.d0, win.d0), d1 = Math.min(s.d1, win.d1)
-    return { d0, d1, v0: vAt(d0), v1: vAt(d1) }
-  })
   const vpts = pts.filter(p => p.d >= win.d0 && p.d <= win.d1)
   const vevents = events.filter(e => e.d >= win.d0 && e.d <= win.d1)
-  // Y 軸上限用可見點的 97 百分位，避免單日離群值把整張圖壓扁（超出的點貼頂顯示）
+  // Y 上限：可見點 97 百分位（離群日貼頂顯示，不壓扁整張圖）
   const vsSorted = vpts.map(p => p.v).sort((a, b) => a - b)
   const p97 = vsSorted.length ? vsSorted[Math.floor((vsSorted.length - 1) * 0.97)] : 0
-  const max = Math.max(thr * 1.25, p97, ...vsegs.flatMap(s => [s.v0, s.v1])) * 1.08
+  const max = Math.max(thr * 1.25, p97) * 1.08
   const px = d => L + ((d - win.d0) / span) * PLOT_W
   const py = v => T + (1 - v / max) * (H - T - B)
   const xStep = [7, 14, 30, 61, 91, 182, 365].find(s => span / s <= 8) || 365
   const xTicks = []
   for (let d = Math.ceil(win.d0 / xStep) * xStep; d <= win.d1; d += xStep) xTicks.push(d)
   const yTicks = [0, 1, 2, 3, 4].map(g => (max / 4) * g)
-  const last = segs[segs.length - 1]
   const bands = [[thr, max, 'var(--crit)'], [thr / 2, thr, 'var(--watch)'], [0, thr / 2, 'var(--good)']]
+  const lastCurve = curves[curves.length - 1]
+  const stepPx = PLOT_W * xStep / span
+  const cellPy = (H - T - B) / 4
+
+  // 曲線取樣成 path（只畫視窗內的部分，值 clamp ≥ 0）
+  const curvePath = c => {
+    const a = Math.max(c.d0, win.d0), b = Math.min(c.d1, win.d1)
+    if (a >= b) return null
+    const n = 64, seg = []
+    for (let k2 = 0; k2 <= n; k2++) {
+      const d = a + (b - a) * k2 / n
+      seg.push(`${k2 ? 'L' : 'M'}${px(d).toFixed(1)},${py(Math.max(0, c.eval(d - c.d0))).toFixed(1)}`)
+    }
+    return seg.join('')
+  }
 
   return (
     <div className="sl-explorer">
       <div className="explorer-bar">
-        <span>視窗 D{Math.round(win.d0)}–D{Math.round(win.d1)}（{Math.round(span)} 天）</span>
-        <span>橫軸每格 {xStep} 天 · 縱軸每格 {(max / 4).toFixed(1)}%</span>
-        <span className="faint">拖曳平移 · 滾輪縮放</span>
+        <label className="fit-pick">趨勢函數
+          <select value={fitType} onChange={e => setFitType(e.target.value)}>
+            {FIT_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </label>
+        <span className="faint">點趨勢線可看公式與 R²</span>
         <span className="btns">
           <button onClick={() => zoomAt(1 / 1.4)} aria-label="放大">＋</button>
           <button onClick={() => zoomAt(1.4)} aria-label="縮小">−</button>
           <button className="txt" onClick={() => setWin({ d0: 0, d1: DMAX })}>重置</button>
         </span>
       </div>
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="speed loss 時間序列（可拖曳平移、縮放，點資料點看詳情）"
+      {selCurve && (
+        <div className="fit-info" role="status">
+          <div className="fi-head">
+            <b>{FIT_TYPES.find(([k]) => k === fitType)?.[1]}</b>
+            <span>區間 D{selCurve.d0}–D{selCurve.d1}（{selCurve.n} 點）· t = 天數 − {selCurve.d0}</span>
+            <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>
+            <button onClick={() => setSelCurve(null)} aria-label="關閉">×</button>
+          </div>
+          <code>{selCurve.formula}</code>
+        </div>
+      )}
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
+        aria-label="speed loss 時間序列（可拖曳平移、縮放；點資料點或趨勢線看詳情）"
         className={dragging ? 'dragging' : ''}
-        onClick={() => { if (!movedRef.current) setSel(null) }}
+        onClick={() => { if (!movedRef.current) { setSel(null); setSelCurve(null) } }}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
+        <text transform={`rotate(-90 20 ${(T + H - B) / 2})`} x="20" y={(T + H - B) / 2}
+          textAnchor="middle" style={{ fill: 'var(--muted)', fontWeight: 600 }}>Speed Loss（%）</text>
+        <text x={L + PLOT_W / 2} y={H - 6} textAnchor="middle" style={{ fill: 'var(--muted)', fontWeight: 600 }}>
+          日期（D = 資料起算第幾天）
+        </text>
         {yTicks.map((v, i) => (
           <g key={i}>
             <line x1={L} y1={py(v)} x2={W - R} y2={py(v)} stroke="var(--chart-grid)" />
-            <text x={L - 6} y={py(v) + 3} textAnchor="end">{v.toFixed(1)}%</text>
+            <text x={L - 8} y={py(v) + 4} textAnchor="end">{v.toFixed(1)}%</text>
           </g>
         ))}
         {xTicks.map(d => (
           <g key={d}>
-            <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 4} stroke="var(--chart-grid)" />
-            <text x={px(d)} y={H - 6} textAnchor="middle">D{d}</text>
+            <line x1={px(d)} y1={H - B} x2={px(d)} y2={H - B + 5} stroke="var(--chart-grid)" />
+            <text x={px(d)} y={H - B + 19} textAnchor="middle">{dateOf(d)}</text>
+            <text x={px(d)} y={H - B + 34} textAnchor="middle" style={{ fill: 'var(--faint)' }}>D{d}</text>
           </g>
         ))}
         <rect x={L} y={T} width={PLOT_W} height={Math.max(0, py(thr) - T)} fill="var(--crit)" opacity=".05" />
         <line x1={L} x2={W - R} y1={py(thr)} y2={py(thr)} stroke="var(--crit)" strokeDasharray="5 4" />
-        <text x={W - R - 4} y={py(thr) - 5} textAnchor="end" style={{ fill: 'var(--crit)' }}>警戒線 {thr}%</text>
+        <text x={W - R - 4} y={py(thr) - 6} textAnchor="end" style={{ fill: 'var(--crit)' }}>警戒線 {thr}%</text>
         {bands.map(([v0, v1, c], i) => {
           const yTop = py(Math.min(v1, max))
           return <rect key={i} x={W - 20} y={yTop} width="10" height={Math.max(0, py(v0) - yTop)} fill={c} opacity=".35" />
@@ -155,30 +276,59 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
         {vevents.map(e => (
           <g key={e.d}>
             <line x1={px(e.d)} x2={px(e.d)} y1={T} y2={H - B} stroke="var(--faint)" strokeDasharray="3 4" />
-            <text x={px(e.d) + 4} y={T + 10}>{e.label}</text>
+            <text x={px(e.d) + 4} y={T + 12}>{e.label}</text>
           </g>
         ))}
-        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="1.7" fill="var(--accent)" opacity=".35" />)}
-        {vsegs.map((s, i) => <line key={i} x1={px(s.d0)} y1={py(s.v0)} x2={px(s.d1)} y2={py(s.v1)} stroke="var(--accent)" strokeWidth="2.2" />)}
-        {last && last.d1 >= win.d0 && last.d1 <= win.d1 && (
-          <g>
-            <circle cx={px(last.d1)} cy={py(last.v1)} r="4" fill="var(--accent)" />
-            <text x={px(last.d1) - 6} y={py(last.v1) + 16} textAnchor="end"
-              style={{ fill: 'var(--text)', fontWeight: 600 }}>目前 {last.v1.toFixed(1)}%</text>
-          </g>
-        )}
+        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="1.9" fill="var(--accent)" opacity=".35" />)}
+        {curves.map((c, i) => {
+          const d = curvePath(c)
+          if (!d) return null
+          const active = selCurve && selCurve.d0 === c.d0
+          return (
+            <g key={i}>
+              <path d={d} fill="none" stroke="var(--accent)" strokeWidth={active ? 3.6 : 2.4} />
+              <path d={d} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke"
+                style={{ cursor: 'pointer' }}
+                onPointerDown={e => e.stopPropagation()}
+                onClick={e => { e.stopPropagation(); setSelCurve(c); setSel(null) }} />
+            </g>
+          )
+        })}
+        {lastCurve && lastCurve.d1 >= win.d0 && lastCurve.d1 <= win.d1 && (() => {
+          const vEnd = Math.max(0, lastCurve.eval(lastCurve.d1 - lastCurve.d0))
+          return (
+            <g>
+              <circle cx={px(lastCurve.d1)} cy={py(vEnd)} r="4" fill="var(--accent)" />
+              <text x={px(lastCurve.d1) - 8} y={py(vEnd) + 18} textAnchor="end"
+                style={{ fill: 'var(--text)', fontWeight: 600 }}>目前 {vEnd.toFixed(1)}%</text>
+            </g>
+          )
+        })()}
+        {/* 比例尺（可視化「每格」）：橫＝一格 x 天數、縱＝一格 y % */}
+        <g>
+          <rect x={W - R - stepPx - 78} y={H - B - cellPy - 34} width={stepPx + 66} height={cellPy + 26}
+            fill="var(--panel)" opacity=".82" />
+          <line x1={W - R - 14 - stepPx} y1={H - B - 14} x2={W - R - 14} y2={H - B - 14} stroke="var(--muted)" strokeWidth="2" />
+          <line x1={W - R - 14 - stepPx} y1={H - B - 19} x2={W - R - 14 - stepPx} y2={H - B - 9} stroke="var(--muted)" strokeWidth="2" />
+          <line x1={W - R - 14} y1={H - B - 19} x2={W - R - 14} y2={H - B - 9} stroke="var(--muted)" strokeWidth="2" />
+          <text x={W - R - 14 - stepPx / 2} y={H - B - 22} textAnchor="middle" style={{ fill: 'var(--muted)' }}>{xStep} 天</text>
+          <line x1={W - R - 28 - stepPx} y1={H - B - 14} x2={W - R - 28 - stepPx} y2={H - B - 14 - cellPy} stroke="var(--muted)" strokeWidth="2" />
+          <line x1={W - R - 33 - stepPx} y1={H - B - 14} x2={W - R - 23 - stepPx} y2={H - B - 14} stroke="var(--muted)" strokeWidth="2" />
+          <line x1={W - R - 33 - stepPx} y1={H - B - 14 - cellPy} x2={W - R - 23 - stepPx} y2={H - B - 14 - cellPy} stroke="var(--muted)" strokeWidth="2" />
+          <text x={W - R - 38 - stepPx} y={H - B - 14 - cellPy / 2 + 4} textAnchor="end" style={{ fill: 'var(--muted)' }}>{(max / 4).toFixed(1)}%</text>
+        </g>
         {vpts.map(p => (
-          <circle key={`h${p.d}`} cx={px(p.d)} cy={py(p.v)} r="8" fill="transparent" style={{ cursor: 'pointer' }}
+          <circle key={`h${p.d}`} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="8" fill="transparent" style={{ cursor: 'pointer' }}
             onPointerDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); setSel(p) }} />
+            onClick={e => { e.stopPropagation(); setSel(p); setSelCurve(null) }} />
         ))}
         {sel && sel.d >= win.d0 && sel.d <= win.d1 && (() => {
-          const x = px(sel.d), y = py(sel.v)
+          const x = px(sel.d), y = Math.max(T, py(sel.v))
           const BW = 232, BH = 132
           const bx = x + 14 + BW > W - R ? x - 14 - BW : x + 14
           const by = Math.min(Math.max(T, y - BH / 2), H - B - BH)
-          const seg = segs.find(s => sel.d >= s.d0 && sel.d <= s.d1)
-          const tv = seg ? seg.v0 + (seg.v1 - seg.v0) * (sel.d - seg.d0) / Math.max(1, seg.d1 - seg.d0) : null
+          const c = curves.find(cv => sel.d >= cv.d0 && sel.d <= cv.d1)
+          const tv = c ? Math.max(0, c.eval(sel.d - c.d0)) : null
           const stp = statusOf(sel.v, thr)
           const gap = sel.v - thr
           return (
@@ -187,7 +337,7 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
               <rect x={bx} y={by} width={BW} height={BH} fill="var(--panel)" stroke="var(--line)" />
               <text x={bx + 12} y={by + 22} style={{ fill: 'var(--text)', fontWeight: 600 }}>{dateOf(sel.d)}（D{sel.d}）</text>
               <text x={bx + 12} y={by + 44}>實測 Speed Loss：{sel.v.toFixed(2)}%</text>
-              <text x={bx + 12} y={by + 62}>區間趨勢值：{tv != null ? `${tv.toFixed(2)}%` : '—'}</text>
+              <text x={bx + 12} y={by + 62}>趨勢值：{tv != null ? `${tv.toFixed(2)}%` : '—'}</text>
               <text x={bx + 12} y={by + 80}>對警戒線 {thr}%：{gap >= 0 ? '+' : ''}{gap.toFixed(2)} pt</text>
               <text x={bx + 12} y={by + 98}>估計額外油耗：{(sel.v * CONFIG.penaltyPerSl).toFixed(1)} t/day</text>
               <text x={bx + 12} y={by + 118} style={{ fill: `var(--${stp})`, fontWeight: 600 }}>狀態：{STATUS_TXT[stp]}</text>
