@@ -57,13 +57,6 @@ function FleetView({ ships, onPick, onAdd, meta }) {
         <div className="banner ok">✓ 全船隊皆在各自警戒線以內</div>
       )}
       <div className="thr-row">
-        <span className="faint">
-          {meta
-            ? `資料來源 ${meta.mode === 'iso' ? 'speed_loss.json' : 'fleet_data.json'}（${meta.generatedAt?.slice(0, 10)} 產出）· ${
-              { iso: 'ISO 19030 speed loss（正式）', 'daily-pct': '後台逐日 speed_loss 欄位', derived: '前端過渡推導（speed_loss.json 抓取失敗）', mixed: '混合來源' }[meta.mode]}`
-            : '離線示意資料'}
-          · 各船警戒線可於「單船分析」頁個別調整 · 超標自動通報：fleet-ops@yangming.com.tw（demo）
-        </span>
         <button className="add-ship" onClick={() => setAdding(true)}>＋ 新增船隻</button>
       </div>
       {adding && <AddShipModal ships={ships} onAdd={onAdd} onClose={() => setAdding(false)} />}
