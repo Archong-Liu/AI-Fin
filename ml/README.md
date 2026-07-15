@@ -9,6 +9,9 @@ data/raw/
 lambdas/etl/handler.py        ETL:清理 + 特徵工程(S3 觸發;run_etl 為可本地跑的純轉換)
 ml/
 ├── build_model.py            ★ 一鍵重現:ETL → 訓練 → 存 model.joblib + submission.csv
+├── speed_loss.py             ISO 19030 Speed Loss + 船殼/螺旋槳歸因(前端 Dashboard 用)
+├── shap_analysis.py          SHAP 可解釋性:各特徵對油耗的貢獻(簡報歸因用)
+├── validate_submission.py    繳交檔硬檢查(102 列/欄位/單位/無金額字樣)
 ├── training/
 │   ├── config.py             特徵清單、標的、燃料熱值、船群、隨機種子(單一真實來源)
 │   ├── model.py              load_processed / add_derived / train / predict_submission / HybridModel
@@ -19,9 +22,13 @@ ml/
 │   └── requirements.txt      訓練環境精確版本(pickle 相容性)
 └── examples/
     ├── submission.csv        102 個預測(build_model.py 產生,repo 的 source of truth)
-    └── fleet_data.json       前端用完整資料(全船隊逐日 + 養護 + 預測 + 驗證)
+    ├── fleet_data.json       前端用完整資料(全船隊逐日 + 養護 + 預測 + 驗證)
+    ├── speed_loss.json       ISO 19030 Speed Loss(speed_loss.py 產生,Dashboard 三張圖資料)
+    ├── shap_summary.json     SHAP 特徵貢獻 + 分組(shap_analysis.py 產生)
+    └── shap_*.png            SHAP 圖(特徵重要性 / 分組貢獻)
 requirements.txt              跑 pipeline 的相依套件
-docs/ml-eda-and-decisions.md  EDA、清理/建模/部署決策與理由
+docs/ml-eda-and-decisions.md      EDA、清理/建模/部署決策與理由
+docs/speed-loss-limitations.md    Speed Loss 已知限制與誠實聲明
 ```
 
 ## Quickstart(clone 下來直接跑)
@@ -190,3 +197,55 @@ S21,136,ME_FULLSPEED_CONSUMP_VLSFO,29.18
 - `is_hidden == true`(S21–S23 遮蔽窗口):主機性能與非預測燃料的油耗欄為 `null`,`foc_eq24` 也是 `null`。
 - 缺失值一律為 `null`;`swt_imputed` / `disp_imputed == true` 表示該列海溫 / 排水量為補值。
 - Speed Loss:用 `SPEED_THROUGH_WATER` 搭配 `steady` 旗標篩穩態日,對照 `days_since_*` 與 `maintenance[]` 做汙損歸因。
+
+---
+
+## 4. Speed Loss(ISO 19030,`ml/speed_loss.py`)
+
+前端 Dashboard 的資料來源。用 ISO 19030 in-service 方法量測船殼/螺旋槳效能隨時間的退化,產出 `ml/examples/speed_loss.json`。
+
+```bash
+python ml/speed_loss.py        # ETL → 每船 speed loss → ml/examples/speed_loss.json
+```
+
+**方法(對齊 ISO 19030-1/-2)**
+- **功率代理**:無扭矩計,依 ISO 19030-2 §4.2 走 brake-power 路徑,以 `foc_eq24` 當交付功率代理。
+- **正規化**:Admiralty 項 `log_v3d23 = log(STW³·排水量^(2/3))` + 風/浪。
+- **同船對自己 + per 乾塢間隔**:每個乾塢間隔以「清洗後 45 天乾淨窗口」錨定為 SL≈0,汙損隨間隔內天數上升。
+- **speed_loss_pct** = 功率增幅 ÷ 3(P ∝ V³)。
+- **船殼 vs 螺旋槳歸因**(ISO §4.3 需 thrust):hull = 定速下所需推力上升;propeller = 單位推力所需功率上升。
+
+**輸出 `speed_loss.json` 結構**
+- `fleet_summary[]`:每船最新 speed loss、狀態(normal/warning/critical)、歸因、趨勢、進塢建議。
+- `ships[<id>]`:
+  - `history[]` — 逐穩態日 `speed_loss_pct` + 平滑曲線 + `days_since_hull`(**圖 a:時序**)
+  - `events[]` — 養護事件,含 `days_since_hull_at_event`(**UWI 陷阱結構性證據**:清洗=0、純 UWI≫0)
+  - `latest.attribution` — 船殼 vs 螺旋槳 %(**圖 b:歸因**)
+  - `fouling_rate_pct_per_100d` + `drydock_recommendation`(**圖 c:汙損累積率 → 進塢建議**)
+
+**🎯 UWI 陷阱**:純 UWI(僅檢查)不重置任何維護時鐘 → 不開新乾塢間隔 → speed loss 曲線在 UWI 後**不會**虛假下降。`days_since_hull_at_event` 提供不可辯駁的結構性證據(hull 清洗當天=0,純 UWI 當天中位數約 668 天)。
+
+> ⚠️ **重要**:這批資料的汙損訊號本質偏弱,speed loss 的**趨勢/排序/UWI 判斷可信**,但**單日絕對值、弱訊號船的 recovery 需保守解讀**。完整說明見 [`docs/speed-loss-limitations.md`](../docs/speed-loss-limitations.md)。
+
+---
+
+## 5. SHAP 可解釋性(`ml/shap_analysis.py`)
+
+拆出各特徵對油耗的貢獻,給簡報做歸因。因 SHAP 不支援 HistGradientBoosting 的原生類別特徵,分析時把 4 個類別特徵轉整數 codes、以相同超參 fit 一個**等價樹模型**解釋殘差(與部署 GBT 預測相關 **0.95**,高保真),再加回物理主幹 `log_v3d23` 的線性 SHAP,得到完整 hybrid 的分解。
+
+```bash
+python ml/shap_analysis.py     # → ml/examples/shap_summary.json + 2 張 PNG
+```
+
+**結果(mean|SHAP|,log 油耗空間)**
+
+| 分組 | 佔比 |
+|---|---|
+| operation_physics(RPM、`log_v3d23` 物理項、速度、排水量…) | **85.4%** |
+| current_slip(洋流代理、滑差) | 6.9% |
+| environment(風/浪/海溫/水深) | 3.7% |
+| vessel_id(ship / ship_type / 上次事件型) | 2.0% |
+| **hull_fouling(`days_since_hull/dd`、硬質汙損)** | **1.5%** |
+| **propeller_fouling(`days_since_prop`、螺旋槳狀態)** | **0.5%** |
+
+**關鍵解讀(誠實,且是簡報彈藥)**:油耗預測由 **RPM + 物理項主導(85%)**,符合船舶工程直覺,這也是模型準(MAPE 4.2%)的原因。**汙損類特徵對油耗的 SHAP 貢獻僅 2%** —— 所以「做清洗能省多少油」不能靠這個油耗模型回答,必須用 `speed_loss.py` 的 **ISO 19030 thrust 法**做船殼/螺旋槳歸因。SHAP 與 Speed Loss 兩者互補:前者證明模型物理合理,後者做汙損量化歸因。詳見 [`docs/speed-loss-limitations.md`](../docs/speed-loss-limitations.md)。

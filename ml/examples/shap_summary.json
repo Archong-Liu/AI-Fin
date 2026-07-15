@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-07-15T10:53:59.410604+00:00",
+  "model": "physics-residual hybrid (Admiralty backbone + HistGradientBoosting)",
+  "shap_space": "log(foc_eq24); values are mean|SHAP| in log-fuel units (relative importance)",
+  "surrogate_fidelity_corr": 0.9507,
+  "n_samples": 3000,
+  "feature_importance": {
+    "log_v3d23": 0.3361,
+    "ME_AVG_RPM": 0.1353,
+    "FULL_SPD_STW_SLIP": 0.0383,
+    "DISPLACEMENT": 0.0215,
+    "PROPELLER_SPEED": 0.0102,
+    "SPEED_THROUGH_WATER": 0.0086,
+    "WATER_DEPTH": 0.0064,
+    "ship": 0.0057,
+    "SWELL_HEIGHT": 0.0053,
+    "CARGO_ON_BOARD": 0.0051,
+    "MID_DRAFT": 0.0048,
+    "days_since_dd": 0.0047,
+    "DIFF_STW_SOG_SLIP": 0.0045,
+    "SEA_WATER_TEMP": 0.0041,
+    "last_event_type": 0.0038,
+    "days_since_hull": 0.0036,
+    "WIND_SCALE": 0.0035,
+    "HOURS_FULL_SPEED": 0.0032,
+    "ship_type": 0.0028,
+    "days_since_prop": 0.0027,
+    "WIND_SPEED": 0.0024,
+    "trim": 0.0022,
+    "SEA_HEIGHT": 0.0011,
+    "last_event_had_hard_fouling": 0.0006,
+    "last_event_prop_cond": 0.0006
+  },
+  "group_contribution": {
+    "hull_fouling": {
+      "mean_abs_shap": 0.009,
+      "pct_of_total": 1.5
+    },
+    "propeller_fouling": {
+      "mean_abs_shap": 0.0034,
+      "pct_of_total": 0.5
+    },
+    "operation_physics": {
+      "mean_abs_shap": 0.527,
+      "pct_of_total": 85.4
+    },
+    "environment": {
+      "mean_abs_shap": 0.0229,
+      "pct_of_total": 3.7
+    },
+    "current_slip": {
+      "mean_abs_shap": 0.0428,
+      "pct_of_total": 6.9
+    },
+    "vessel_id": {
+      "mean_abs_shap": 0.0123,
+      "pct_of_total": 2.0
+    }
+  },
+  "hull_vs_propeller": {
+    "hull_fouling_pct": 1.5,
+    "propeller_fouling_pct": 0.5,
+    "fouling_total_pct": 2.0,
+    "note": "汙損類特徵對『油耗預測』的 SHAP 貢獻很小(RPM/速度主導)——這是誠實結果,也解釋了油耗模型為何準。船殼 vs 螺旋槳的量化歸因請用 speed_loss.py 的 thrust 法(ISO 19030),那才是汙損歸因的正確工具。"
+  },
+  "honest_note": "SHAP 以等價樹模型(類別轉整數 codes)解釋殘差 GBT + 物理主幹線性項;與部署 GBT 的預測相關 0.951(高保真)。"
+}
