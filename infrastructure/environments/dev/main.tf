@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
@@ -48,4 +52,18 @@ module "event" {
 
   # Ensure the S3->Lambda invoke permissions exist before S3 validates targets
   depends_on = [module.data_processing]
+}
+
+# --- CI/CD Module (GitHub OIDC + frontend deploy role) ---
+module "cicd" {
+  source = "../../modules/cicd"
+
+  project_prefix = var.project_prefix
+  environment    = var.environment
+
+  frontend_bucket_arn         = module.data_store.frontend_bucket_arn
+  cloudfront_distribution_arn = module.data_store.cloudfront_distribution_arn
+
+  # Flip to false if the account already has a GitHub OIDC provider
+  create_oidc_provider = var.create_github_oidc_provider
 }
