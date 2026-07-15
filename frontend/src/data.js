@@ -4,6 +4,9 @@ export const CONFIG = {
   penaltyPerSl: 0.55, // 每 1% speed loss ≈ 額外 t/day 油耗 — 模型應輸出此值
 }
 
+// 各船種預設警戒線（%）：新船建檔時帶入，操作者可在單船分析逐船調整
+export const DEFAULT_THR = { W1: 8, W2: 7 }
+
 let _seed = 42
 export function setSeed(s) { _seed = s }
 export function rnd() { _seed = (_seed * 1103515245 + 12345) % 2147483648; return _seed / 2147483648 }
@@ -26,8 +29,24 @@ export function makeShips() {
       daysClean: Math.round(60 + rnd() * 640),
       cleanCount: 1 + Math.floor(rnd() * 4),
       penalty: base * CONFIG.penaltyPerSl,
+      thr: DEFAULT_THR[type],
     }
   }).sort((a, b) => b.sl - a.sl)
+}
+
+// 新增船隻（input 系統用）：只填基本資料，speed loss 以清潔天數粗估並生成趨勢
+// ponytail: 正式版由後台依 noon report 計算 sl/trend，這裡僅供 demo 立即上圖
+export function makeShip({ name, type, daysClean, cleanCount, thr }, id) {
+  setSeed(9000 + id)
+  const sl = Math.min(11, Math.max(0.4, 0.6 + daysClean * 0.012 + rnd() * 0.8))
+  const trend = []
+  for (let m = 0; m < 24; m++) trend.push(Math.max(0.3, sl * (0.25 + 0.75 * m / 23) + (rnd() - 0.5) * 0.5))
+  trend[23] = sl
+  return {
+    id, name, type, sl, trend, daysClean, cleanCount,
+    penalty: sl * CONFIG.penaltyPerSl,
+    thr: thr ?? DEFAULT_THR[type],
+  }
 }
 
 export const STATUS_TXT = { good: '良好', watch: '觀察', crit: '建議清潔' }
@@ -39,7 +58,7 @@ export function bufferDays(ship, thr) {
   return Math.min(365, Math.round((thr - ship.sl) / slope))
 }
 
-export function aiAnswer(q, ships, ship, thr) {
+export function aiAnswer(q, ships, ship) {
   if (q.includes('優先') || q.includes('哪些船')) {
     const top = ships.slice(0, 3).map(s => `${s.name}（${s.sl.toFixed(1)}%）`).join('、')
     const t = ships.slice(0, 3).reduce((a, s) => a + s.penalty, 0).toFixed(1)

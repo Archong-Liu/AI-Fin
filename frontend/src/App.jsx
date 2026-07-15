@@ -1,6 +1,8 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react'
-import { makeShips, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
-import { spark, slChart, focChart, attrDonut, waterfall, scatterChart, mapeBars, simChart } from './charts.js'
+import React, { useState, useEffect, useRef } from 'react'
+import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
+import { spark, focChart, attrDonut, waterfall, scatterChart, mapeBars, simChart } from './charts.js'
+import SlExplorer, { DMAX } from './SlExplorer.jsx'
+import { fetchFleetData, adaptFleet } from './api.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -16,93 +18,144 @@ const NAV_ICONS = {
 }
 
 /* ---------- 船隊總覽 ---------- */
-function FleetView({ ships, thr, setThr, onPick }) {
+function FleetView({ ships, onPick, onAdd, meta }) {
   const [sent, setSent] = useState(false)
-  const [filter, setFilter] = useState('all')
-  const over = ships.filter(s => s.sl >= thr)
+  const [filter, setFilter] = useState('crit') // 永遠鎖定一個分類，沒有「全部」視圖
+  const [adding, setAdding] = useState(false)
+  const over = ships.filter(s => s.sl >= s.thr)
   const avgSl = ships.reduce((s, x) => s + x.sl, 0) / ships.length
   const totPenalty = over.reduce((s, x) => s + x.penalty, 0)
-  // 狀態完全由「目前警戒線」動態推導——警戒線一改，分類與數量即時重算
-  const counts = { all: ships.length, crit: 0, watch: 0, good: 0 }
-  ships.forEach(s => { counts[statusOf(s.sl, thr)]++ })
-  const CATS = [
-    { key: 'all', label: '全部' },
-    { key: 'crit', label: STATUS_TXT.crit },
-    { key: 'watch', label: STATUS_TXT.watch },
-    { key: 'good', label: STATUS_TXT.good },
-  ]
-  const shown = filter === 'all' ? ships : ships.filter(s => statusOf(s.sl, thr) === filter)
+  const shown = ships.filter(s => statusOf(s.sl, s.thr) === filter)
   return (
     <>
       {over.length ? (
         <div className="banner crit" role="alert">
-          ⚠ {over.length} 艘船超過警戒線 {thr}%：{over.map(s => s.name).join('、')}
+          ⚠ {over.length} 艘船超過各自警戒線：{over.map(s => `${s.name}（≥${s.thr}%）`).join('、')}
           <button disabled={sent} onClick={() => setSent(true)}>{sent ? '已寄送 ✓（demo）' : '立即寄送通報 Email'}</button>
         </div>
       ) : (
-        <div className="banner ok">✓ 全船隊皆在警戒線 {thr}% 以內</div>
+        <div className="banner ok">✓ 全船隊皆在各自警戒線以內</div>
       )}
       <div className="thr-row">
-        <label htmlFor="thrInput">油耗超標警戒線</label>
-        <input id="thrInput" type="number" min="2" max="20" step="0.5" value={thr}
-          onChange={e => { setThr(parseFloat(e.target.value) || 8); setSent(false) }} />
-        <span>%</span>
-        <span className="faint">超標自動通報：fleet-ops@yangming.com.tw（demo）</span>
+        <span className="faint">
+          {meta ? `資料來源 fleet_data.json（${meta.generatedAt?.slice(0, 10)} 產出 · ${meta.nRows.toLocaleString()} 列）` : '離線示意資料'}
+          · 各船警戒線可於「單船分析」頁個別調整 · 超標自動通報：fleet-ops@yangming.com.tw（demo）
+        </span>
+        <button className="add-ship" onClick={() => setAdding(true)}>＋ 新增船隻</button>
       </div>
+      {adding && <AddShipModal ships={ships} onAdd={onAdd} onClose={() => setAdding(false)} />}
       <h2 className="section">船隊健康指標</h2>
       <div className="kpis">
         <div className="kpi"><div className="label">船隊平均 Speed Loss</div>
           <div className="value">{avgSl.toFixed(1)}<small> %</small></div>
           <div className="delta up">▲ 0.3 pt vs 上月</div></div>
         <div className="kpi"><div className="label">超標船數</div>
-          <div className="value">{over.length}<small> / 15 艘</small></div>
-          <div className="delta flat">警戒線 ≥ {thr}%</div></div>
+          <div className="value">{over.length}<small> / {ships.length} 艘</small></div>
+          <div className="delta flat">依各船警戒線</div></div>
         <div className="kpi"><div className="label">超標船估計多燒</div>
           <div className="value">{totPenalty.toFixed(1)}<small> t/day</small></div>
           <div className="delta up">燃油當量（VLSFO）</div></div>
         <div className="kpi"><div className="label">模型 FOC 預測誤差</div>
-          <div className="value">4.2<small> % MAPE</small></div>
-          <div className="delta down">▼ 0.6 pt（重訓後）</div></div>
+          <div className="value">{meta?.mape?.toFixed(1) ?? '4.2'}<small> % MAPE</small></div>
+          <div className="delta down">{meta?.mape ? 'event-holdout 驗證' : '▼ 0.6 pt（重訓後）'}</div></div>
       </div>
       <h2 className="section">全船隊 Speed Loss（依嚴重度排序 · 點擊查看單船）</h2>
       <div className="fleet-body">
-        <aside className="status-side" aria-label="狀態篩選">
-          {CATS.map(c => (
-            <button key={c.key} className={`status-item ${c.key} ${filter === c.key ? 'active' : ''}`}
-              onClick={() => setFilter(c.key)}>
-              {c.key !== 'all' && <span className={`fdot ${c.key === 'crit' ? 'crit' : c.key === 'watch' ? 'warn' : 'ok'}`} />}
-              <span>{c.label}</span>
-              <span className="cnt">{counts[c.key]}</span>
-            </button>
-          ))}
-        </aside>
+        <StatusSide ships={ships} filter={filter} setFilter={setFilter} />
         <div className="fleet">
-          {shown.length === 0 && <div className="faint">此類別目前沒有船</div>}
-          {shown.map(s => {
-            const st = statusOf(s.sl, thr)
-            return (
-              <button key={s.id} className={`ship ${st}`} onClick={() => onPick(s.id)} aria-label={`查看 ${s.name}`}>
-                <div className="ship-head">
-                  <span className="name">{s.name} <span className="type">{s.type}</span></span>
-                  <span className={`pill ${st}`}>{STATUS_TXT[st]}</span>
-                </div>
-                <div className="row">
-                  <span className="sl">{s.sl.toFixed(1)}<small> % SL</small></span>
-                  <span className="pen">+{s.penalty.toFixed(1)} t/d</span>
-                </div>
-                <div className="meta">距上次清潔 {s.daysClean} 天{s.sl < thr ? ` · 緩衝約 ${bufferDays(s, thr)} 天` : ''}</div>
-                <Svg className="" html={spark(s.trend)} />
-              </button>
-            )
-          })}
+        {shown.length === 0 && <div className="faint">此類別目前沒有船</div>}
+        {shown.map(s => {
+          const st = statusOf(s.sl, s.thr)
+          return (
+            <button key={s.id} className={`ship ${st}`} onClick={() => onPick(s.id)} aria-label={`查看 ${s.name}`}>
+              <div className="ship-head">
+                <span className="name">{s.name}</span>
+                <span className={`pill ${st}`}>{STATUS_TXT[st]}</span>
+              </div>
+              <div className="row">
+                <span className="sl">{s.sl.toFixed(1)}<small> % SL</small></span>
+                <span className="pen">+{s.penalty.toFixed(1)} t/d</span>
+              </div>
+              <div className="meta">距上次清潔 {s.daysClean} 天{s.sl < s.thr ? ` · 緩衝約 ${bufferDays(s, s.thr)} 天` : ''}</div>
+              <Svg className="" html={spark(s.trend)} />
+            </button>
+          )
+        })}
         </div>
       </div>
     </>
   )
 }
 
+/* ---------- 狀態篩選側欄（船卡區最左，貼網格背景） ---------- */
+function StatusSide({ ships, filter, setFilter }) {
+  // 狀態由「各船自己的警戒線」動態推導——任一船的警戒線一改，分類與數量即時重算
+  const counts = { crit: 0, watch: 0, good: 0 }
+  ships.forEach(s => { counts[statusOf(s.sl, s.thr)]++ })
+  const CATS = [
+    { key: 'crit', label: STATUS_TXT.crit, dot: 'crit' },
+    { key: 'watch', label: STATUS_TXT.watch, dot: 'warn' },
+    { key: 'good', label: STATUS_TXT.good, dot: 'ok' },
+  ]
+  return (
+    <aside className="status-side" aria-label="狀態篩選">
+      {CATS.map(c => (
+        <button key={c.key} className={`status-item ${c.key} ${filter === c.key ? 'active' : ''}`}
+          onClick={() => setFilter(c.key)}>
+          <span className={`fdot ${c.dot}`} />
+          <span>{c.label}</span>
+          <span className="cnt">{counts[c.key]}</span>
+        </button>
+      ))}
+    </aside>
+  )
+}
+
+/* ---------- 新增船隻 ---------- */
+function AddShipModal({ ships, onAdd, onClose }) {
+  const [f, setF] = useState({ name: '', type: 'W1', daysClean: 30, cleanCount: 0, thr: DEFAULT_THR.W1 })
+  const [err, setErr] = useState('')
+  // 換船種時警戒線自動帶入該船種預設，仍可手動覆寫
+  const set = (k, v) => { setErr(''); setF(o => ({ ...o, [k]: v, ...(k === 'type' ? { thr: DEFAULT_THR[v] } : {}) })) }
+  const submit = e => {
+    e.preventDefault()
+    const name = f.name.trim().toUpperCase()
+    if (!name) return setErr('請輸入船名')
+    if (ships.some(s => s.name === name)) return setErr(`船名 ${name} 已存在`)
+    onAdd({ name, type: f.type, daysClean: Math.max(0, +f.daysClean || 0), cleanCount: Math.max(0, +f.cleanCount || 0), thr: +f.thr || DEFAULT_THR[f.type] })
+    onClose()
+  }
+  return (
+    <div className="modal-ov" onClick={onClose}>
+      <form className="modal" onClick={e => e.stopPropagation()} onSubmit={submit} aria-label="新增船隻">
+        <h3>新增船隻</h3>
+        <label>船名<input autoFocus value={f.name} placeholder="例：S24" onChange={e => set('name', e.target.value)} /></label>
+        <div className="row2">
+          <label>船種
+            <select value={f.type} onChange={e => set('type', e.target.value)}>
+              <option value="W1">W1</option><option value="W2">W2</option>
+            </select>
+          </label>
+          <label>警戒線（%）<input type="number" min="2" max="20" step="0.5" value={f.thr} onChange={e => set('thr', e.target.value)} /></label>
+        </div>
+        <div className="row2">
+          <label>距上次清潔（天）<input type="number" min="0" value={f.daysClean} onChange={e => set('daysClean', e.target.value)} /></label>
+          <label>累計水下清潔（次）<input type="number" min="0" value={f.cleanCount} onChange={e => set('cleanCount', e.target.value)} /></label>
+        </div>
+        <div className="faint">建立後 Speed Loss 會先以清潔天數粗估（demo），待後台串接 noon report 即改用實際計算值。</div>
+        {err && <div className="err" role="alert">{err}</div>}
+        <div className="actions">
+          <button type="button" className="ghost2" onClick={onClose}>取消</button>
+          <button type="submit" className="primary">建立船隻</button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 /* ---------- 單船分析 ---------- */
-function RecoCard({ ship, thr }) {
+function RecoCard({ ship }) {
+  const thr = ship.thr
   const st = statusOf(ship.sl, thr)
   const dock = ship.cleanCount >= 3
   const lifeMonths = Math.max(2, 7 - ship.cleanCount * 1.5)
@@ -124,53 +177,93 @@ function RecoCard({ ship, thr }) {
   )
 }
 
-function ShipView({ ships, ship, thr, onPick }) {
+const SHIP_TABS = [['overview', '總覽'], ['foc', '油耗細節'], ['validate', '模型驗證']]
+const SL_RANGES = [['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
+
+function ShipView({ ships, ship, onPick, updateShip }) {
   const [simDay, setSimDay] = useState(14)
+  const [tab, setTab] = useState('overview')
+  const [win, setWin] = useState({ d0: 0, d1: DMAX })
+  const thr = ship.thr
   const st = statusOf(ship.sl, thr)
   const sim = simChart(ship, simDay)
   return (
     <>
-      <div className="ship-toolbar">
-        <select value={ship.id} onChange={e => onPick(+e.target.value)}>
-          {ships.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <span className={`pill ${st}`}>{STATUS_TXT[st]}</span>
-        <span className="faint">距上次清潔 {ship.daysClean} 天 · 資料點 1,216 筆（篩選後）</span>
+      <div className="ship-tabs" role="tablist">
+        {SHIP_TABS.map(([k, l]) => (
+          <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? 'active' : ''}
+            onClick={() => setTab(k)}>{l}</button>
+        ))}
       </div>
-      <div className="grid-2">
-        <div className="card">
-          <h3>Speed Loss 時間序列</h3>
-          <div className="hint">每點＝一個良好天氣航行日（風 ≤4 級、全速 ≥22h）的實測 Speed Loss；實線＝養護區間趨勢，斜率即汙損惡化速率</div>
-          <Svg html={slChart(ship, thr)} />
-          <div className="legend">
-            <span><span className="sw dot" />每日實測點</span>
-            <span><span className="sw" style={{ background: 'var(--accent)' }} />區間趨勢</span>
-            <span><span className="sw" style={{ background: 'var(--faint)' }} />養護事件</span>
-            <span><span className="sw" style={{ background: 'var(--crit)' }} />警戒線</span>
+      {tab === 'overview' && <>
+        <div className="ship-layout">
+          <aside className="ship-ctrl">
+            <div className="ctrl-box">
+              <select value={ship.id} onChange={e => onPick(+e.target.value)} aria-label="選擇船隻">
+                {ships.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <div><span className={`pill ${st}`}>{STATUS_TXT[st]}</span></div>
+              <div className="ctrl-meta">距上次清潔 {ship.daysClean} 天<br />資料點 {(ship.series ? ship.series.pts.length : 1216).toLocaleString()} 筆（可比條件篩選後）</div>
+              <label className="thr-edit">此船警戒線（%）
+                <span>
+                  <input type="number" min="2" max="20" step="0.5" value={ship.thr}
+                    onChange={e => updateShip(ship.id, { thr: parseFloat(e.target.value) || ship.thr })} /> %
+                </span>
+              </label>
+            </div>
+            <div className="ctrl-box">
+              <div className="ctrl-title">顯示區間</div>
+              <div className="range-opts">
+                {SL_RANGES.map(([k, l, d0]) => (
+                  <label key={k}>
+                    <input type="radio" name="slrange" checked={win.d0 === d0 && win.d1 === DMAX}
+                      onChange={() => setWin({ d0, d1: DMAX })} />{l}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="ctrl-box plain">
+              <div className="ctrl-title">圖例說明</div>
+              <div className="legend v">
+                <span><span className="sw dot" />每日實測點</span>
+                <span><span className="sw" style={{ background: 'var(--accent)' }} />區間趨勢</span>
+                <span><span className="sw" style={{ background: 'var(--faint)' }} />養護事件</span>
+                <span><span className="sw" style={{ background: 'var(--crit)' }} />警戒線</span>
+              </div>
+              <div className="ctrl-meta">每點＝一個良好天氣航行日（風 ≤4 級、全速 ≥22h）；右緣色帶＝狀態區間（紅／黃／綠）</div>
+            </div>
+          </aside>
+          <div className="card hero">
+            <div className="hero-num">
+              <b>{ship.sl.toFixed(1)}<small> % SL</small></b>
+              <span className={`hero-st ${st}`}>
+                {ship.sl >= thr ? `已超過警戒線 ${thr}%` : `警戒線 ${thr}% · 緩衝約 ${bufferDays(ship, thr)} 天`}
+              </span>
+            </div>
+            <SlExplorer ship={ship} thr={thr} win={win} setWin={setWin} />
           </div>
         </div>
-        <div className="col">
-          <RecoCard ship={ship} thr={thr} />
+        <div className="ship-bottom">
+          <RecoCard ship={ship} />
           <div className="card">
             <h3>損失歸因（模型估計）</h3>
             <div className="hint">船體汙損 vs 螺槳 vs 其他因素</div>
             <Svg className="donut-row" html={attrDonut(ship)} />
           </div>
+          <div className="card">
+            <h3>清潔排程模擬器</h3>
+            <div className="hint">拖動滑桿假設清潔日，比較未來 120 天累積額外燃油</div>
+            <div className="sim-row">
+              <label htmlFor="simSlider">第 <b>{simDay}</b> 天清潔</label>
+              <input id="simSlider" type="range" min="5" max="60" value={simDay} onChange={e => setSimDay(+e.target.value)} />
+            </div>
+            <Svg html={sim.svg} />
+            <div className="sim-stats">{sim.stats}</div>
+          </div>
         </div>
-      </div>
-      <div className="card mt">
-        <h3>清潔排程模擬器</h3>
-        <div className="hint">拖動滑桿假設清潔日，比較「清潔 vs 不清潔」的累積額外燃油（未來 120 天）</div>
-        <div className="sim-row">
-          <label htmlFor="simSlider">假設於第 <b>{simDay}</b> 天清潔</label>
-          <input id="simSlider" type="range" min="5" max="60" value={simDay} onChange={e => setSimDay(+e.target.value)} />
-          <span className="sim-stats">{sim.stats}</span>
-        </div>
-        <Svg html={sim.svg} />
-      </div>
-      <details className="adv">
-        <summary>進階 · 油耗細節、模型歸因與驗證（工程師展開用）</summary>
-        <div className="card mt-s">
+      </>}
+      {tab === 'foc' && <>
+        <div className="card">
           <h3>每日油耗 Daily FOC — 實測 vs 模型基準（乾淨船體）</h3>
           <div className="hint">柱狀＝實測 FOC（t/day）；藍線＝模型預測之乾淨船體基準；兩者差距即汙損造成的額外油耗</div>
           <Svg html={focChart(ship)} />
@@ -182,51 +275,116 @@ function ShipView({ ships, ship, thr, onPick }) {
           <div className="step"><div className="no">STAGE 4</div><div className="nm">衰退曲線分解</div><div className="ds">船體 / 螺槳 / 其他<br />對齊養護事件時間軸</div></div>
           <div className="step"><div className="no">STAGE 5</div><div className="nm">輸出</div><div className="ds">Speed Loss % · 歸因 · 建議</div></div>
         </div>
-        <div className="grid-2 mt">
-          <div className="card">
-            <h3>單日油耗歸因 — 瀑布圖（{ship.name} · D1800）</h3>
-            <div className="hint">乾淨船體基準 + 各因素增量 = 當日實測 FOC；紅色＝船體汙損（本案焦點）</div>
-            <Svg html={waterfall(ship)} />
-          </div>
-          <div className="card">
-            <h3>模型驗證</h3>
-            <div className="hint">holdout 期間預測 vs 實測 Daily FOC</div>
-            <Svg className="" html={scatterChart()} />
-            <Svg className="" html={mapeBars(ships)} />
-          </div>
+        <div className="card mt" style={{ maxWidth: 860 }}>
+          <h3>單日油耗歸因 — 瀑布圖（{ship.name} · D1800）</h3>
+          <div className="hint">乾淨船體基準 + 各因素增量 = 當日實測 FOC；紅色＝船體汙損（本案焦點）</div>
+          <Svg html={waterfall(ship)} />
         </div>
-      </details>
+      </>}
+      {tab === 'validate' && (
+        <div className="card" style={{ maxWidth: 560 }}>
+          <h3>模型驗證</h3>
+          <div className="hint">holdout 期間預測 vs 實測 Daily FOC</div>
+          <Svg className="" html={scatterChart()} />
+          <Svg className="" html={mapeBars(ships)} />
+        </div>
+      )}
     </>
   )
 }
 
 /* ---------- 資料與報告 ---------- */
-function ManualVerify({ thr }) {
-  const [c, setC] = useState(58); const [h, setH] = useState(22); const [s, setS] = useState(15.2)
-  const [out, setOut] = useState(null)
-  const run = () => {
-    if (!c || !h) { setOut({ text: '請填入油耗與全速時數' }); return }
-    const foc = (c / h) * 24, base = 50 + (s - 14) * 3.2, diff = ((foc - base) / base) * 100 // ponytail: 基準用線性 mock，正式版換模型 API
-    const lv = diff >= thr ? 'crit' : diff >= thr / 2 ? 'watch' : 'good'
-    setOut({ foc, base, diff, lv })
-  }
+function DualVerify({ ships }) {
+  const [shipId, setShipId] = useState(ships[0].id)
+  const [c, setC] = useState(58); const [h, setH] = useState(22); const [sw, setSw] = useState(15.2)
+  const [manual, setManual] = useState('')
+  const [tol, setTol] = useState(2)
+  const [log, setLog] = useState([])
+  const ship = ships.find(x => x.id === shipId) || ships[0]
+
+  // 系統軌：即時計算，不用按按鈕
+  const foc = c > 0 && h > 0 ? (c / h) * 24 : null
+  const base = 50 + (sw - 14) * 3.2 // ponytail: 基準用線性 mock，正式版換模型 API
+  const diff = foc != null ? ((foc - base) / base) * 100 : null
+  const st = diff != null ? statusOf(diff, ship.thr) : null
+
+  // 人工軌：與系統值比對，差異在容忍範圍內＝一致
+  const m = parseFloat(manual)
+  const gapPct = foc != null && m > 0 ? ((m - foc) / foc) * 100 : null
+  const agree = gapPct != null ? Math.abs(gapPct) <= tol : null
+  const record = () => setLog(l => [{ id: l.length + 1, name: ship.name, foc, m, gapPct, agree }, ...l])
+  const okN = log.filter(r => r.agree).length
+
   return (
-    <div className="card">
-      <div className="hint">丟一筆測試數據進來，系統算出 Daily FOC 並與模型基準比對——供管理員跟人工手算結果核對、建立信任。</div>
-      <div className="mvrow">
-        <label>當日主機全速油耗 (MT)<input type="number" value={c} step="0.1" onChange={e => setC(+e.target.value)} /></label>
-        <label>全速時數 (hr)<input type="number" value={h} step="0.5" onChange={e => setH(+e.target.value)} /></label>
-        <label>對水航速 STW (kn)<input type="number" value={s} step="0.1" onChange={e => setS(+e.target.value)} /></label>
-        <button onClick={run}>計算比對</button>
+    <>
+      <div className="pipeline">
+        <div className="step"><div className="no">STEP 1</div><div className="nm">丟一筆測試數據</div><div className="ds">船 + 當日油耗／時數／航速</div></div>
+        <div className="step"><div className="no">STEP 2</div><div className="nm">系統自動計算</div><div className="ds">Daily FOC vs 模型基準</div></div>
+        <div className="step"><div className="no">STEP 3</div><div className="nm">填入人工手算值</div><div className="ds">差異在容忍內＝一致</div></div>
+        <div className="step"><div className="no">STEP 4</div><div className="nm">累積一致率</div><div className="ds">達標後評估退出雙軌</div></div>
       </div>
-      {out && (
-        <div className="mv-out">{out.text || (
-          <>Daily FOC = {out.foc.toFixed(1)} t/day ・ 模型基準 {out.base.toFixed(1)} t/day ・ 偏差{' '}
-            <b style={{ color: `var(--${out.lv})` }}>{out.diff >= 0 ? '+' : ''}{out.diff.toFixed(1)}%</b>
-            {out.lv === 'crit' ? '（超過警戒線——請與人工手算比對後回報）' : out.lv === 'watch' ? '（偏高，建議追蹤）' : '（正常範圍）'} ※ demo 公式</>
-        )}</div>
-      )}
-    </div>
+      <div className="verify-grid mt">
+        <div className="card">
+          <h3>① 測試數據</h3>
+          <div className="hint">輸入輪機部門回報的一筆當日原始數據（人工手算須使用同一筆）</div>
+          <div className="mvrow">
+            <label>船隻
+              <select value={shipId} onChange={e => setShipId(+e.target.value)}>
+                {ships.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </label>
+            <label>當日主機全速油耗 (MT)<input type="number" value={c} step="0.1" onChange={e => setC(+e.target.value)} /></label>
+            <label>全速時數 (hr)<input type="number" value={h} step="0.5" onChange={e => setH(+e.target.value)} /></label>
+            <label>對水航速 STW (kn)<input type="number" value={sw} step="0.1" onChange={e => setSw(+e.target.value)} /></label>
+          </div>
+          <div className="ctrl-meta">狀態判定採用此船警戒線 {ship.thr}%</div>
+        </div>
+        <div className="card">
+          <h3>② 系統計算 × ③ 人工比對</h3>
+          <table className="kv"><tbody>
+            <tr><td>系統 Daily FOC</td><td>{foc != null ? `${foc.toFixed(1)} t/day` : '—'}</td></tr>
+            <tr><td>模型乾淨基準</td><td>{base.toFixed(1)} t/day</td></tr>
+            <tr><td>偏差（≒ speed loss）</td>
+              <td style={{ color: st ? `var(--${st})` : undefined }}>
+                {diff != null ? `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%（${STATUS_TXT[st]}）` : '—'}
+              </td></tr>
+          </tbody></table>
+          <div className="mvrow" style={{ marginTop: 14 }}>
+            <label>人工手算 Daily FOC (t/day)<input type="number" value={manual} step="0.1" placeholder="輪機部門算的值" onChange={e => setManual(e.target.value)} /></label>
+            <label>容忍差異 ± (%)<input type="number" value={tol} min="0.5" step="0.5" onChange={e => setTol(+e.target.value || 2)} /></label>
+          </div>
+          {agree != null && (
+            <div className={`verdict ${agree ? 'ok' : 'bad'}`} role="status">
+              {agree
+                ? `✓ 一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，在 ±${tol}% 容忍範圍內`
+                : `✗ 不一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，超出 ±${tol}%，建議回報模型團隊複查`}
+            </div>
+          )}
+          <button className="cta2" disabled={agree == null} onClick={record}>記錄本次比對 →</button>
+        </div>
+      </div>
+      <div className="card mt">
+        <h3>④ 驗證紀錄（雙軌期間累積）</h3>
+        {log.length === 0 ? (
+          <div className="hint">尚無紀錄——每次比對後按「記錄」即累積於此，作為結束雙軌的依據。</div>
+        ) : (
+          <>
+            <div className="vstat">一致 {okN} / {log.length} 筆（{(okN / log.length * 100).toFixed(0)}%）· 建議：連續 30 筆一致率 ≥95% 即可評估結束雙軌（demo 門檻）</div>
+            <table className="vlog">
+              <thead><tr><th>#</th><th>船</th><th>系統 FOC</th><th>人工 FOC</th><th>差異</th><th>結果</th></tr></thead>
+              <tbody>
+                {log.map(r => (
+                  <tr key={r.id}><td>{r.id}</td><td>{r.name}</td>
+                    <td>{r.foc.toFixed(1)}</td><td>{r.m.toFixed(1)}</td>
+                    <td>{r.gapPct >= 0 ? '+' : ''}{r.gapPct.toFixed(1)}%</td>
+                    <td className={r.agree ? 'ok' : 'bad'}>{r.agree ? '✓ 一致' : '✗ 不一致'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    </>
   )
 }
 
@@ -282,7 +440,7 @@ function ExplorerPanel() {
   )
 }
 
-function DataView({ ships, thr }) {
+function DataView({ ships }) {
   return (
     <div>
         <h2 className="section">每日正午報表 · 自動接收</h2>
@@ -304,18 +462,18 @@ function DataView({ ships, thr }) {
           <h1>船隊船體能效月報 — D1825</h1>
           <div className="meta">模型版本 hull-fx v0.3（示意）· 全數字均為 DEMO 佔位值</div>
           <h4>① 摘要</h4>
-          <p>本月全船隊平均 Speed Loss 為 <b>{(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(1)}%</b>。<b>{ships.filter(s => s.sl >= thr).length} 艘</b>船舶超過警戒線，估計每日合計多燒 <b>{ships.filter(s => s.sl >= thr).reduce((s, x) => s + x.penalty, 0).toFixed(1)} t</b> 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 <b>4.2%</b>。</p>
+          <p>本月全船隊平均 Speed Loss 為 <b>{(ships.reduce((s, x) => s + x.sl, 0) / ships.length).toFixed(1)}%</b>。<b>{ships.filter(s => s.sl >= s.thr).length} 艘</b>船舶超過各自警戒線，估計每日合計多燒 <b>{ships.filter(s => s.sl >= s.thr).reduce((s, x) => s + x.penalty, 0).toFixed(1)} t</b> 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 <b>4.2%</b>。</p>
           <h4>② 優先處理建議</h4>
           <table>
             <thead><tr><th>船名</th><th>Speed Loss</th><th>額外油耗</th><th>建議</th><th>調度緩衝期</th></tr></thead>
             <tbody>
               {ships.slice(0, 5).map(s => {
-                const st = statusOf(s.sl, thr)
+                const st = statusOf(s.sl, s.thr)
                 const act = st === 'crit' ? (s.cleanCount >= 3 ? '評估進塢' : '安排清潔') : st === 'watch' ? '觀察' : '—'
                 return (
                   <tr key={s.id}><td>{s.name}</td><td className="num">{s.sl.toFixed(1)}%</td>
                     <td className="num">{s.penalty.toFixed(1)} t/d</td>
-                    <td>{act}</td><td className="num">{s.sl >= thr ? '已超標' : `${bufferDays(s, thr)} 天`}</td></tr>
+                    <td>{act}</td><td className="num">{s.sl >= s.thr ? '已超標' : `${bufferDays(s, s.thr)} 天`}</td></tr>
                 )
               })}
             </tbody>
@@ -399,10 +557,24 @@ function Login({ onLogin }) {
 
 /* ---------- App ---------- */
 export default function App() {
-  const ships = useMemo(makeShips, [])
+  const [ships, setShips] = useState(makeShips)
+  const [meta, setMeta] = useState(null) // 真實資料 metadata；null = mock/載入中
   const [view, setView] = useState('fleet')
-  const [thr, setThr] = useState(8)
   const [shipId, setShipId] = useState(ships[0].id)
+  const updateShip = (id, patch) => setShips(list => list.map(s => s.id === id ? { ...s, ...patch } : s))
+  const addShip = f => setShips(list =>
+    [...list, makeShip(f, Math.max(...list.map(s => s.id)) + 1)].sort((a, b) => b.sl - a.sl))
+
+  // issue #5：開機抓 fleet_data.json（同源 → CloudFront fallback），失敗則沿用 mock
+  useEffect(() => {
+    let on = true
+    fetchFleetData().then(j => {
+      if (!on || !j) return
+      const { ships: real, meta: m } = adaptFleet(j)
+      if (real.length) { setShips(real); setMeta(m); setShipId(real[0].id) }
+    })
+    return () => { on = false }
+  }, [])
   const [drawerOpen, setDrawerOpen] = useState(window.innerWidth > 1100)
   const [msgs, setMsgs] = useState([
     { role: 'sys', text: '— AI 已連線，會同步你目前查看的視圖 —' },
@@ -419,7 +591,7 @@ export default function App() {
 
   const ask = q => {
     setMsgs(m => [...m, { role: 'user', text: q }])
-    setTimeout(() => setMsgs(m => [...m, { role: 'ai', text: aiAnswer(q, ships, ship, thr) }]), 350)
+    setTimeout(() => setMsgs(m => [...m, { role: 'ai', text: aiAnswer(q, ships, ship) }]), 350)
   }
   const pick = id => { setShipId(id); setView('ship') }
 
@@ -464,13 +636,13 @@ export default function App() {
           </div>
         </header>
         <main className="content">
-          {view === 'fleet' && <FleetView ships={ships} thr={thr} setThr={setThr} onPick={pick} />}
-          {view === 'ship' && <ShipView ships={ships} ship={ship} thr={thr} onPick={setShipId} />}
+          {view === 'fleet' && <FleetView ships={ships} onPick={pick} onAdd={addShip} meta={meta} />}
+          {view === 'ship' && <ShipView ships={ships} ship={ship} onPick={setShipId} updateShip={updateShip} />}
           {view === 'verify' && (<>
             <h2 className="section">人工比對（導入期雙軌驗證）</h2>
-            <ManualVerify thr={thr} />
+            <DualVerify ships={ships} />
           </>)}
-          {view === 'data' && <DataView ships={ships} thr={thr} />}
+          {view === 'data' && <DataView ships={ships} />}
         </main>
       </div>
       <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} ctx={ctx} msgs={msgs} onAsk={ask} />
