@@ -27,3 +27,9 @@ variable "create_github_oidc_provider" {
   type        = bool
   default     = true
 }
+
+variable "ses_email" {
+  description = "SES sender/recipient email for on-demand notifications (verified in sandbox)"
+  type        = string
+  default     = "aaarrchong@gmail.com"
+}

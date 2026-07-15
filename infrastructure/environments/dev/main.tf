@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -64,6 +68,19 @@ module "api" {
   inference_image_uri  = "${var.aws_account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.project_prefix}-inference:latest"
   processed_bucket_arn = module.data_store.processed_data_bucket_arn
   processed_bucket_id  = module.data_store.processed_data_bucket_id
+}
+
+# --- Notification Module (on-demand emailing via SES) ---
+module "notification" {
+  source = "../../modules/notification"
+
+  project_prefix = var.project_prefix
+  environment    = var.environment
+
+  api_id            = module.api.api_id
+  api_execution_arn = module.api.api_execution_arn
+  ses_sender        = var.ses_email
+  ses_recipient     = var.ses_email
 }
 
 # --- CI/CD Module (GitHub OIDC + frontend deploy role) ---

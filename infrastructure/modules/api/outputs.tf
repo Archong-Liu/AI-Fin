@@ -11,3 +11,11 @@ output "predict_url" {
 output "inference_api_lambda_name" {
   value = aws_lambda_function.inference_api.function_name
 }
+
+output "api_id" {
+  value = aws_apigatewayv2_api.this.id
+}
+
+output "api_execution_arn" {
+  value = aws_apigatewayv2_api.this.execution_arn
+}
