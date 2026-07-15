@@ -7,3 +7,7 @@ numpy==2.1.3
 pandas==2.2.3
 joblib==1.4.2
 pyarrow==19.0.0   # only needed to write processed Parquet in the S3 Lambda path
+
+# analysis-only (ml/speed_loss.py dashboard data + ml/shap_analysis.py explainability)
+matplotlib==3.10.0
+shap==0.52.0
