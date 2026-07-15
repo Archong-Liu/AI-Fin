@@ -54,6 +54,18 @@ module "event" {
   depends_on = [module.data_processing]
 }
 
+# --- API Module (on-demand what-if inference endpoint) ---
+module "api" {
+  source = "../../modules/api"
+
+  project_prefix = var.project_prefix
+  environment    = var.environment
+
+  inference_image_uri  = "${var.aws_account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.project_prefix}-inference:latest"
+  processed_bucket_arn = module.data_store.processed_data_bucket_arn
+  processed_bucket_id  = module.data_store.processed_data_bucket_id
+}
+
 # --- CI/CD Module (GitHub OIDC + frontend deploy role) ---
 module "cicd" {
   source = "../../modules/cicd"

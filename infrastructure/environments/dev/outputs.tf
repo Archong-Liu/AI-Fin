@@ -37,3 +37,7 @@ output "inference_lambda_name" {
 output "frontend_deploy_role_arn" {
   value = module.cicd.frontend_deploy_role_arn
 }
+
+output "api_predict_url" {
+  value = module.api.predict_url
+}

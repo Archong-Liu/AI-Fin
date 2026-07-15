@@ -121,6 +121,90 @@ def load_model() -> "M.HybridModel":
     return joblib.load(local)
 
 
+# ============================================================== API entry point
+# On-demand "what-if" inference: POST feature values -> predicted fuel.
+# Served via API Gateway (HTTP API). Uses the SAME image as the batch handler; the
+# Lambda is created with image_config command = ["handler.api_handler"].
+_model_cache = None
+
+
+def _get_model():
+    """Load the model once per warm container (avoids re-download on every request)."""
+    global _model_cache
+    if _model_cache is None:
+        _model_cache = load_model()
+    return _model_cache
+
+
+def _resp(status: int, body: dict) -> dict:
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body),
+    }
+
+
+def _predict_row(payload: dict) -> dict:
+    """Build a 1-row feature frame from a what-if payload and run the model.
+
+    Accepts any subset of model features; missing ones are left NaN (the
+    HistGradientBoosting residual handles them natively). The Admiralty physics term
+    log_v3d23 is derived from SPEED_THROUGH_WATER + DISPLACEMENT when both are given.
+    """
+    row = {f: np.nan for f in C.FEATURES}
+    # Categorical defaults: HistGBR's category encoder rejects all-NaN category columns,
+    # so give each categorical a training-seen fallback (overridden by the payload).
+    cat_defaults = {"ship": "S1", "ship_type": "W1",
+                    "last_event_type": "NONE", "last_event_prop_cond": "Good"}
+    row.update(cat_defaults)
+    for k, v in payload.items():
+        if k in row and v is not None:
+            row[k] = v
+
+    stw = payload.get("SPEED_THROUGH_WATER")
+    disp = payload.get("DISPLACEMENT")
+    if stw and disp:
+        row["log_v3d23"] = float(np.log((float(stw) ** 3) * (float(disp) ** (2 / 3))))
+
+    df = pd.DataFrame([row])
+    df[C.NUM_FEATS] = df[C.NUM_FEATS].apply(pd.to_numeric, errors="coerce")
+    for c in C.CAT_FEATS:
+        df[c] = df[c].astype("category")
+
+    eq24 = float(_get_model().predict(df)[0])
+    fuel = str(payload.get("fuel_type") or "VLSFO").upper()
+    lcv = C.LCV.get(fuel, 40.2)
+    return {
+        "foc_eq24_vlsfo": round(eq24, 2),          # VLSFO-equivalent full-speed fuel / 24h
+        "fuel_type": fuel,
+        "predicted_mt_per_day": round(eq24 * (40.2 / lcv), 2),
+    }
+
+
+def api_handler(event, context):
+    """API Gateway (HTTP API) entrypoint for on-demand what-if fuel inference.
+
+    Request body (JSON): any subset of model features. For a meaningful prediction
+    provide at least SPEED_THROUGH_WATER, ME_AVG_RPM and DISPLACEMENT; optional
+    fuel_type (default VLSFO) selects the mass conversion.
+    """
+    logger.info(f"api_handler event: {json.dumps(event.get('rawPath', ''))}")
+    try:
+        body = event.get("body") or "{}"
+        if event.get("isBase64Encoded"):
+            import base64
+            body = base64.b64decode(body).decode("utf-8")
+        payload = json.loads(body) if isinstance(body, str) else body
+        if not isinstance(payload, dict):
+            return _resp(400, {"error": "request body must be a JSON object"})
+        prediction = _predict_row(payload)
+        echo = {k: payload[k] for k in payload if k in C.FEATURES or k == "fuel_type"}
+        return _resp(200, {"input_echo": echo, "prediction": prediction})
+    except Exception as e:
+        logger.error(f"api_handler failed: {e}", exc_info=True)
+        return _resp(500, {"error": str(e)})
+
+
 # ================================================================= submission
 def submission_payload(submission: pd.DataFrame) -> dict:
     """Canonical prediction output (the 102 masked-window cells)."""
