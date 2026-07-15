@@ -41,3 +41,11 @@ output "frontend_deploy_role_arn" {
 output "api_predict_url" {
   value = module.api.predict_url
 }
+
+output "notify_lambda_name" {
+  value = module.notification.notify_lambda_name
+}
+
+output "ses_verified_identities" {
+  value = module.notification.verified_identities
+}
