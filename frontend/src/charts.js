@@ -14,7 +14,7 @@ export function spark(points, w = 190, h = 34) {
   </svg>`
 }
 
-function dailySeries(ship) {
+export function dailySeries(ship) {
   setSeed(1000 + ship.id)
   const events = [{ d: 560, label: 'UWC 清洗' }, { d: 1120, label: 'PP 拋光' }, { d: 1550, label: 'UWC+PP' }]
   const bounds = [0, ...events.map(e => e.d), 1825]
@@ -35,33 +35,7 @@ function dailySeries(ship) {
   return { segs, events, pts }
 }
 
-export function slChart(ship, thr) {
-  const { segs, events, pts } = dailySeries(ship)
-  const W = 680, H = 250, L = 38, B = 24, T = 12, R = 8, DMAX = 1825
-  const max = Math.max(thr * 1.25, ...segs.map(s => s.v1)) * 1.08
-  const px = d => L + (d / DMAX) * (W - L - R)
-  const py = v => T + (1 - v / max) * (H - T - B)
-  let svg = ''
-  for (let g = 0; g <= 4; g++) {
-    const val = (max / 4) * g, y = py(val)
-    svg += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
-      <text x="${L - 6}" y="${y + 3}" text-anchor="end">${val.toFixed(0)}%</text>`
-  }
-  for (let d = 0; d <= DMAX; d += 365) svg += `<text x="${px(d)}" y="${H - 6}" text-anchor="middle">D${d}</text>`
-  svg += `<rect x="${L}" y="${T}" width="${W - L - R}" height="${Math.max(0, py(thr) - T)}" fill="var(--crit)" opacity=".05"/>
-    <line x1="${L}" x2="${W - R}" y1="${py(thr)}" y2="${py(thr)}" stroke="var(--crit)" stroke-dasharray="5 4"/>
-    <text x="${W - R}" y="${py(thr) - 5}" text-anchor="end" style="fill:var(--crit)">警戒線 ${thr}%</text>`
-  events.forEach(e => {
-    svg += `<line x1="${px(e.d)}" x2="${px(e.d)}" y1="${T}" y2="${H - B}" stroke="var(--faint)" stroke-dasharray="3 4"/>
-    <text x="${px(e.d) + 4}" y="${T + 10}">${e.label}</text>`
-  })
-  svg += pts.map(p => `<circle cx="${px(p.d).toFixed(1)}" cy="${py(p.v).toFixed(1)}" r="1.7" fill="var(--accent)" opacity=".35"/>`).join('')
-  segs.forEach(s => { svg += `<line x1="${px(s.d0)}" y1="${py(s.v0)}" x2="${px(s.d1)}" y2="${py(s.v1)}" stroke="var(--accent)" stroke-width="2.2"/>` })
-  const last = segs[segs.length - 1]
-  svg += `<circle cx="${px(last.d1)}" cy="${py(last.v1)}" r="4" fill="var(--accent)"/>
-    <text x="${px(last.d1) - 6}" y="${py(last.v1) + 16}" text-anchor="end" style="fill:var(--text);font-weight:600">目前 ${last.v1.toFixed(1)}%</text>`
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="speed loss 時間序列">${svg}</svg>`
-}
+// slChart 已改由 SlExplorer.jsx（可拖拉/縮放的互動元件）取代
 
 export function focChart(ship) {
   setSeed(2000 + ship.id)
@@ -94,9 +68,9 @@ export function attrDonut(ship) {
     stroke-dasharray="${((pct / 100) * C).toFixed(1)} ${C}" stroke-dashoffset="${((-off / 100) * C).toFixed(1)}" transform="rotate(-90 60 60)"/>`
   return `<svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="損失歸因">
       ${seg(hull, 0, 'var(--crit)')}${seg(prop, hull, 'var(--watch)')}${seg(other, hull + prop, 'var(--chart-grid)')}
-      <text x="60" y="57" text-anchor="middle" style="font-size:19px;font-weight:600;fill:var(--text)">${hull.toFixed(0)}%</text>
+      <text x="60" y="57" text-anchor="middle" style="font-size:22.8px;font-weight:600;fill:var(--text)">${hull.toFixed(0)}%</text>
       <text x="60" y="72" text-anchor="middle">船體汙損</text></svg>
-    <div style="font-size:12.5px;color:var(--muted);line-height:2">
+    <div style="font-size:15px;color:var(--muted);line-height:2">
       <span style="color:var(--crit)">●</span> 船體汙損 ${hull.toFixed(0)}%<br>
       <span style="color:var(--watch)">●</span> 螺槳 ${prop.toFixed(0)}%<br>
       <span style="color:var(--faint)">●</span> 其他 ${other.toFixed(0)}%</div>`
@@ -158,12 +132,12 @@ export function scatterChart() {
 export function mapeBars(ships) {
   setSeed(88)
   const rows = ships.slice(0, 6).map(s => ({ n: s.name, m: 3 + rnd() * 2.6 }))
-  return `<div style="font-size:11.5px;color:var(--muted);margin-bottom:6px">各船 Daily FOC 預測 MAPE（全船隊 4.2%）</div>` +
+  return `<div style="font-size:13.8px;color:var(--muted);margin-bottom:6px">各船 Daily FOC 預測 MAPE（全船隊 4.2%）</div>` +
     rows.map(r => `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
-      <span style="font-family:var(--font-data);font-size:10.5px;width:60px;flex:none">${r.n}</span>
+      <span style="font-family:var(--font-data);font-size:12.6px;width:60px;flex:none">${r.n}</span>
       <div style="flex:1;height:7px;background:var(--panel-2);border-radius:4px;overflow:hidden">
         <div style="width:${((r.m / 6) * 100).toFixed(0)}%;height:100%;background:${r.m > 5 ? 'var(--watch)' : 'var(--accent)'}"></div></div>
-      <span style="font-family:var(--font-data);font-size:11px;width:38px;text-align:right">${r.m.toFixed(1)}%</span></div>`).join('')
+      <span style="font-family:var(--font-data);font-size:13.2px;width:38px;text-align:right">${r.m.toFixed(1)}%</span></div>`).join('')
 }
 
 export function simChart(ship, cleanDay) {
@@ -175,7 +149,7 @@ export function simChart(ship, cleanDay) {
     a.push(ca); b.push(cb)
   }
   const net = ca - cb
-  const W = 680, H = 200, L = 52, B = 24, T = 12, R = 10
+  const W = 400, H = 230, L = 48, B = 24, T = 14, R = 10
   const max = Math.max(a[days], b[days]) * 1.06 || 1
   const px = t => L + (t / days) * (W - L - R)
   const py = v => T + (1 - v / max) * (H - T - B)
