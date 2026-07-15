@@ -102,11 +102,17 @@ def lambda_handler(event, context):
         maintenance_df = load_csv_from_s3(RAW_BUCKET, MAINTENANCE_KEY)
         logger.info(f"Loaded {len(voyage_df)} voyage rows, {len(maintenance_df)} maintenance rows")
 
-        clean_df = run_etl(voyage_df, maintenance_df)
+        cleaning_report = []
+        clean_df = run_etl(voyage_df, maintenance_df, report=cleaning_report)
 
         output_key = generate_output_key(key)
         save_to_s3(clean_df, PROCESSED_BUCKET, output_key)
         logger.info(f"Wrote {len(clean_df)} rows to s3://{PROCESSED_BUCKET}/{output_key}")
+
+        report_key = generate_report_key(key)
+        save_cleaning_report(cleaning_report, PROCESSED_BUCKET, report_key)
+        logger.info(f"Wrote {len(cleaning_report)} cleaning record(s) to "
+                    f"s3://{PROCESSED_BUCKET}/{report_key}")
 
         return {
             "statusCode": 200,
@@ -114,7 +120,9 @@ def lambda_handler(event, context):
                 "message": "ETL pipeline completed successfully",
                 "output_records": len(clean_df),
                 "predict_cells": int(clean_df["predict_fuel"].notna().sum()),
+                "cleaning_records": len(cleaning_report),
                 "output_location": f"s3://{PROCESSED_BUCKET}/{output_key}",
+                "cleaning_report": f"s3://{PROCESSED_BUCKET}/{report_key}",
             }),
         }
     except Exception as e:
@@ -122,18 +130,22 @@ def lambda_handler(event, context):
         raise
 
 
-def run_etl(voyage_df: pd.DataFrame, maintenance_df: pd.DataFrame) -> pd.DataFrame:
+def run_etl(voyage_df: pd.DataFrame, maintenance_df: pd.DataFrame, report=None) -> pd.DataFrame:
     """Pure transform (no S3) so it can be unit-tested / run locally.
 
     Order matters: markers are captured first, outliers cleaned before imputation,
     imputation before the physics feature, maintenance join last.
+
+    `report` (optional): a list into which each cleaning decision is appended
+    (ship/day/column/original value/reason). Left None by callers that don't need the
+    audit trail (e.g. the ML build script), keeping the transform contract unchanged.
     """
     df = dedupe_and_parse(voyage_df)
     df = add_fuel_target(df)
-    df = clean_outliers(df)
+    df = clean_outliers(df, report=report)
     df = impute_sea_temp(df)
     df = impute_displacement(df)
-    df = flag_speed_inconsistency(df)
+    df = flag_speed_inconsistency(df, report=report)
     df = add_features(df)
     df = join_maintenance(df, maintenance_df)
     return df.rename(columns={"De-identification Name": "ship", "NOON_UTC": "day"})
@@ -191,16 +203,60 @@ def add_fuel_target(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ================================================================= 3. outliers
-def clean_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    """Physical sanity checks + bad-value scrubbing (no rows dropped, only cells NaN'd)."""
+def _record_cleaning(report, df: pd.DataFrame, mask: pd.Series, col: str,
+                     reason_code: str, reason: str, action: str = "scrubbed_to_nan"):
+    """Log a summary line and (if `report` is not None) append one audit row per
+    affected datapoint capturing the ship, day-index, column and ORIGINAL value.
+
+    Call this BEFORE assigning NaN so the original value is still present. The
+    detailed rows go to the S3 cleaning report (CSV); CloudWatch only gets the count.
+    """
+    n = int(mask.sum())
+    if n == 0:
+        return
+    logger.info(f"[clean] {action}: {n} datapoint(s) in {col} | {reason_code}: {reason}")
+    if report is None:
+        return
+    affected = df.loc[mask, ["De-identification Name", "NOON_UTC", col]]
+    for _, r in affected.iterrows():
+        report.append({
+            "ship": r["De-identification Name"],
+            "day": r["NOON_UTC"],
+            "column": col,
+            "original_value": r[col],
+            "action": action,
+            "reason_code": reason_code,
+            "reason": reason,
+        })
+
+
+def clean_outliers(df: pd.DataFrame, report=None) -> pd.DataFrame:
+    """Physical sanity checks + bad-value scrubbing (no rows dropped, only cells NaN'd).
+
+    Each scrub is recorded (ship/day/column/original value/reason) into `report`, which
+    the handler flushes to a CSV cleaning report in S3 for a durable data-quality audit.
+    """
     for c in SLIP_COLS:
-        df.loc[df[c].abs() > 50, c] = np.nan          # S10 shows +/- thousands
+        mask = df[c].abs() > 50                        # S10 shows +/- thousands
+        _record_cleaning(report, df, mask, c, "SLIP_IMPLAUSIBLE",
+                         "slip magnitude > 50% (physically implausible)")
+        df.loc[mask, c] = np.nan
     for c, lo, hi in RANGE_RULES:
-        df.loc[(df[c] <= lo) | (df[c] > hi), c] = np.nan
+        mask = (df[c] <= lo) | (df[c] > hi)
+        _record_cleaning(report, df, mask, c, "OUT_OF_RANGE",
+                         f"outside physical range ({lo}, {hi}]")
+        df.loc[mask, c] = np.nan
     # full speed but no fuel logged => missing, not zero (only non-hidden rows)
-    df.loc[(~df["is_hidden"]) & (df["foc_eq"] <= 0), ["foc_eq", "foc_eq24"]] = np.nan
+    mask = (~df["is_hidden"]) & (df["foc_eq"] <= 0)
+    _record_cleaning(report, df, mask, "foc_eq", "FUEL_ZERO_AT_FULL_SPEED",
+                     "full-speed day but fuel <= 0 (treated as missing, not zero)")
+    df.loc[mask, ["foc_eq", "foc_eq24"]] = np.nan
     # too few full-speed hours => per-24h extrapolation unreliable => drop target only
-    df.loc[(~df["is_hidden"]) & (df["HOURS_FULL_SPEED"] < MIN_FULLSPEED_HOURS), "foc_eq24"] = np.nan
+    mask = (~df["is_hidden"]) & (df["HOURS_FULL_SPEED"] < MIN_FULLSPEED_HOURS)
+    _record_cleaning(report, df, mask, "HOURS_FULL_SPEED", "INSUFFICIENT_FULL_SPEED_HOURS",
+                     f"full-speed hours < {MIN_FULLSPEED_HOURS}h -> per-24h fuel extrapolation "
+                     f"unreliable (foc_eq24 scrubbed)")
+    df.loc[mask, "foc_eq24"] = np.nan
     return df
 
 
@@ -217,6 +273,10 @@ def impute_sea_temp(df: pd.DataFrame) -> pd.DataFrame:
 
     df["SEA_WATER_TEMP"] = np.concatenate(
         [fill(g) for _, g in df.groupby("De-identification Name", sort=False)])
+    n_imp = int(df["swt_imputed"].sum())
+    if n_imp:
+        logger.info(f"[impute] SEA_WATER_TEMP: filled {n_imp} missing value(s) via per-ship "
+                    f"day-index interpolation (fallback: ship median)")
     return df
 
 
@@ -231,16 +291,23 @@ def impute_displacement(df: pd.DataFrame) -> pd.DataFrame:
     est = df["CARGO_ON_BOARD"] + ship_off.fillna(offset.median())
     df["disp_imputed"] = df["DISPLACEMENT"].isna() & est.notna()
     df["DISPLACEMENT"] = df["DISPLACEMENT"].fillna(est)
+    n_imp = int(df["disp_imputed"].sum())
+    if n_imp:
+        logger.info(f"[impute] DISPLACEMENT: filled {n_imp} missing value(s) via "
+                    f"cargo + per-ship median(displacement - cargo) offset")
     return df
 
 
 # ================================================================= 5. speed check
-def flag_speed_inconsistency(df: pd.DataFrame) -> pd.DataFrame:
+def flag_speed_inconsistency(df: pd.DataFrame, report=None) -> pd.DataFrame:
     """Flag STW/SOG gaps that the reported current column does not corroborate."""
     gap = df["SPEED_THROUGH_WATER"] - df["AVG_SPEED"]
     df["stw_sog_gap"] = gap
     corroborated = (df["DIFF_STW_SOG_SLIP"] - gap).abs() <= 1.5
     df["speed_suspect"] = (gap.abs() > 3) & ~corroborated.fillna(False)
+    _record_cleaning(report, df, df["speed_suspect"], "stw_sog_gap", "SPEED_INCONSISTENT",
+                     "STW/SOG gap > 3kn not corroborated by reported current",
+                     action="flagged_excluded_from_training")
     return df
 
 
@@ -329,9 +396,30 @@ def generate_output_key(input_key: str) -> str:
     return f"processed/{base_name}_cleaned_{timestamp}.parquet"
 
 
+def generate_report_key(input_key: str) -> str:
+    """Cleaning-report key under a distinct prefix (NOT processed/*.parquet, so it does
+    not trigger the inference Lambda)."""
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    base_name = os.path.splitext(os.path.basename(input_key))[0]
+    return f"cleaning-reports/{base_name}_cleaning_{timestamp}.csv"
+
+
 def save_to_s3(df: pd.DataFrame, bucket: str, key: str):
     buffer = io.BytesIO()
     df.to_parquet(buffer, index=False, engine="pyarrow")
     buffer.seek(0)
     s3().put_object(Bucket=bucket, Key=key, Body=buffer.getvalue(),
                     ContentType="application/octet-stream")
+
+
+# Stable column order for the cleaning-report CSV (audit trail of scrubbed/flagged data).
+REPORT_COLUMNS = ["ship", "day", "column", "original_value", "action", "reason_code", "reason"]
+
+
+def save_cleaning_report(records: list, bucket: str, key: str):
+    """Write the per-datapoint cleaning audit as CSV. Always writes a header (even with
+    zero records) so each run has a corresponding, self-describing report object."""
+    df = pd.DataFrame(records, columns=REPORT_COLUMNS)
+    df = df.sort_values(["ship", "day", "column"]) if not df.empty else df
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    s3().put_object(Bucket=bucket, Key=key, Body=csv_bytes, ContentType="text/csv")
