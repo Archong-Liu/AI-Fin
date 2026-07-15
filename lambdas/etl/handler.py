@@ -2,362 +2,327 @@
 YMINSIGHT - ETL Lambda Handler
 Event-Driven Data Cleaning & Feature Engineering Pipeline
 
-Triggered by S3 PutObject event when new CSV is uploaded to raw-data bucket.
-Performs:
-1. Data validation & type casting
-2. Weather filtering (WIND_SCALE <= 4)
-3. Full speed filtering (HOURS_FULL_SPEED >= 22)
-4. Feature engineering (days since last maintenance, fouling severity, fuel type detection)
-5. Saves processed data to S3 processed-data bucket
+Triggered by S3 PutObject event when a new voyage CSV is uploaded to the raw-data
+bucket. Produces one row per (ship, day) with modelling features + target, and
+writes Parquet to the processed-data bucket.
+
+Design notes (confirmed against EDA — see docs/ml-eda-and-decisions.md):
+- The dataset uses HIDDEN / PREDICT string markers in masked windows. These MUST be
+  captured BEFORE numeric coercion, otherwise the 102 PREDICT cells (the inference
+  targets) are lost to NaN.
+- WIND_SCALE <= 4 and HOURS_FULL_SPEED >= 22 are NOT hard filters. They define a
+  `steady` flag used (a) as a training sample weight and (b) to select the Speed-Loss
+  baseline. Hard-filtering here would discard ~60% of usable training rows AND could
+  drop rows we must serve.
+- NOON_UTC is a per-ship day index (0..~1825, ~5 years), not a timestamp. Maintenance
+  event_date (calendar) is aligned into that index via a fleet epoch (~2021-01-01),
+  so the maintenance clock uses the SAME basis on both sides.
+- All maintenance-derived features use only events with event_day <= the row's day
+  (no future leakage).
 """
 
+import io
 import json
-import os
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
-import boto3
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-s3_client = boto3.client("s3")
+_s3_client = None
 
-# Configuration
+
+def s3():
+    """Lazy S3 client so the pure transform (run_etl) is importable without boto3."""
+    global _s3_client
+    if _s3_client is None:
+        import boto3
+        _s3_client = boto3.client("s3")
+    return _s3_client
+
+# ------------------------------------------------------------------ configuration
 PROCESSED_BUCKET = os.environ.get("PROCESSED_BUCKET", "yminsight-processed-data")
 RAW_BUCKET = os.environ.get("RAW_BUCKET", "yminsight-raw-data")
 MAINTENANCE_KEY = os.environ.get("MAINTENANCE_KEY", "maintenance/maintenance.csv")
 
-# Filtering thresholds (ISO 19030 compliant)
+# `steady` definition (aligns with the PREDICT-day selection & ISO 19030 baseline).
 MAX_WIND_SCALE = 4
 MIN_HOURS_FULL_SPEED = 22
+# Below this many full-speed hours the per-24h fuel extrapolation (x24/h) is unreliable.
+MIN_FULLSPEED_HOURS = 4
 
-# Fouling severity mapping
-FOULING_SEVERITY = {
-    "slime": 1,
-    "algae": 2,
-    "barnacle": 3,
-    "calcium": 4,
-    "tubeworm": 5,
+# NOON_UTC=0 maps to this fleet-wide calendar epoch (derived by aligning the calendar
+# event_date column onto the NOON_UTC day-index; ~67/77 events imply 2021-01-01 +/-3d).
+NOON_UTC_EPOCH = pd.Timestamp("2021-01-01")
+
+# Lower heating value (MJ/kg). Fuels are folded to VLSFO(40.2)-equivalent so the model
+# has one comparable target across fuel types.
+LCV = {"HSHFO": 40.2, "ULSFO": 41.2, "VLSFO": 40.2, "LSMGO": 42.7, "BIO_HSFO": 39.4}
+FUEL_COLS = [f"ME_FULLSPEED_CONSUMP_{f}" for f in LCV]
+
+W1_SHIPS = {f"S{i}" for i in range(1, 9)} | {"S21"}
+
+# Fouling severity weights (issue's proposed scale; see doc for the caveat that these
+# do not materially move the model and are kept mainly for the dashboard narrative).
+FOULING_SEVERITY = {"slime": 1, "algae": 2, "barnacle": 3, "calcium": 4, "tubeworm": 5}
+HARD_FOULING = ("barnacle", "calcium", "tubeworm")
+
+# Which maintenance types reset which component clock.
+RESET = {
+    "hull": {"DD", "UWC", "UWC+PP"},
+    "prop": {"DD", "PP", "UWI+PP", "UWC+PP"},
+    "dd": {"DD"},
 }
 
+# Physical sanity ranges: (col, low_exclusive, high_inclusive) -> outside => NaN.
+RANGE_RULES = [
+    ("SPEED_THROUGH_WATER", 1, 30), ("AVG_SPEED", 1, 30),
+    ("FORE_DRAFT", 2, 25), ("AFTER_DRAFT", 2, 25),
+    ("DISPLACEMENT", 1000, 400000), ("ME_AVG_RPM", 10, 150),
+]
+SLIP_COLS = ["FULL_SPD_STW_SLIP", "DIFF_STW_SOG_SLIP", "ME_SLIP"]
 
+
+# ============================================================== Lambda entry point
 def lambda_handler(event, context):
-    """
-    Main Lambda entry point. Triggered by S3 PutObject event.
-    """
-    logger.info(f"ETL Lambda triggered with event: {json.dumps(event)}")
-
+    """Triggered by S3 PutObject. Runs the ETL and writes processed Parquet."""
+    logger.info(f"ETL Lambda triggered: {json.dumps(event)}")
     try:
-        # Extract S3 event info
         record = event["Records"][0]
         bucket = record["s3"]["bucket"]["name"]
         key = record["s3"]["object"]["key"]
+        logger.info(f"Processing s3://{bucket}/{key}")
 
-        logger.info(f"Processing file: s3://{bucket}/{key}")
-
-        # Load raw voyage data
         voyage_df = load_csv_from_s3(bucket, key)
-        logger.info(f"Loaded {len(voyage_df)} raw records")
-
-        # Load maintenance history
         maintenance_df = load_csv_from_s3(RAW_BUCKET, MAINTENANCE_KEY)
-        logger.info(f"Loaded {len(maintenance_df)} maintenance records")
+        logger.info(f"Loaded {len(voyage_df)} voyage rows, {len(maintenance_df)} maintenance rows")
 
-        # Step 1: Data validation & type casting
-        voyage_df = validate_and_cast(voyage_df)
+        clean_df = run_etl(voyage_df, maintenance_df)
 
-        # Step 2: Apply weather filter (WIND_SCALE <= 4)
-        voyage_df = filter_weather(voyage_df)
-        logger.info(f"After weather filter: {len(voyage_df)} records")
-
-        # Step 3: Apply full speed filter (HOURS_FULL_SPEED >= 22)
-        voyage_df = filter_full_speed(voyage_df)
-        logger.info(f"After full speed filter: {len(voyage_df)} records")
-
-        # Step 4: Feature engineering
-        voyage_df = engineer_features(voyage_df, maintenance_df)
-        logger.info(f"Feature engineering complete: {voyage_df.shape[1]} columns")
-
-        # Step 5: Save processed data to S3
         output_key = generate_output_key(key)
-        save_to_s3(voyage_df, PROCESSED_BUCKET, output_key)
-        logger.info(f"Saved processed data to s3://{PROCESSED_BUCKET}/{output_key}")
+        save_to_s3(clean_df, PROCESSED_BUCKET, output_key)
+        logger.info(f"Wrote {len(clean_df)} rows to s3://{PROCESSED_BUCKET}/{output_key}")
 
         return {
             "statusCode": 200,
             "body": json.dumps({
                 "message": "ETL pipeline completed successfully",
-                "input_records": len(event["Records"]),
-                "output_records": len(voyage_df),
+                "output_records": len(clean_df),
+                "predict_cells": int(clean_df["predict_fuel"].notna().sum()),
                 "output_location": f"s3://{PROCESSED_BUCKET}/{output_key}",
             }),
         }
-
     except Exception as e:
-        logger.error(f"ETL pipeline failed: {str(e)}", exc_info=True)
+        logger.error(f"ETL pipeline failed: {e}", exc_info=True)
         raise
 
 
+def run_etl(voyage_df: pd.DataFrame, maintenance_df: pd.DataFrame) -> pd.DataFrame:
+    """Pure transform (no S3) so it can be unit-tested / run locally.
+
+    Order matters: markers are captured first, outliers cleaned before imputation,
+    imputation before the physics feature, maintenance join last.
+    """
+    df = dedupe_and_parse(voyage_df)
+    df = add_fuel_target(df)
+    df = clean_outliers(df)
+    df = impute_sea_temp(df)
+    df = impute_displacement(df)
+    df = flag_speed_inconsistency(df)
+    df = add_features(df)
+    df = join_maintenance(df, maintenance_df)
+    return df.rename(columns={"De-identification Name": "ship", "NOON_UTC": "day"})
+
+
+# ================================================================= 1. parse & dedupe
+def dedupe_and_parse(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicates (PREDICT rows win), capture HIDDEN/PREDICT markers, then cast.
+
+    The order is critical: `PREDICT`/`HIDDEN` are strings that would coerce to NaN,
+    so we record `predict_fuel` (which fuel a PREDICT cell targets) and `is_hidden`
+    (HORSE_POWER masked) BEFORE numeric conversion.
+    """
+    df = df.copy()
+    n0 = len(df)
+
+    # exact-duplicate rows, then near-duplicate (ship, day) keeping the PREDICT row
+    df = df.drop_duplicates()
+    has_predict = df[FUEL_COLS].eq("PREDICT").any(axis=1)
+    df = (df.assign(_p=has_predict)
+            .sort_values("_p", ascending=False, kind="stable")
+            .drop_duplicates(subset=["De-identification Name", "NOON_UTC"], keep="first")
+            .sort_index()
+            .drop(columns="_p"))
+    logger.info(f"dedupe: {n0} -> {len(df)} rows")
+
+    # capture markers before numeric coercion
+    predict_fuel = pd.Series(pd.NA, index=df.index, dtype="string")
+    for c in FUEL_COLS:
+        predict_fuel = predict_fuel.mask(df[c] == "PREDICT", c)
+    df["predict_fuel"] = predict_fuel
+    df["is_hidden"] = df["HORSE_POWER"] == "HIDDEN"
+
+    keep_str = ["De-identification Name", "VOYAGE", "predict_fuel", "is_hidden"]
+    num_cols = [c for c in df.columns if c not in keep_str]
+    df[num_cols] = (df[num_cols]
+                    .replace({"HIDDEN": None, "PREDICT": None})
+                    .apply(pd.to_numeric, errors="coerce"))
+    return df
+
+
+# ================================================================= 2. fuel target
+def add_fuel_target(df: pd.DataFrame) -> pd.DataFrame:
+    """VLSFO-equivalent full-speed fuel (foc_eq), normalised to per-24h (foc_eq24)."""
+    eq = sum(df[f"ME_FULLSPEED_CONSUMP_{f}"].fillna(0) * lcv / 40.2 for f, lcv in LCV.items())
+    n_fuels = sum((df[f"ME_FULLSPEED_CONSUMP_{f}"].fillna(0) > 0).astype(int) for f in LCV)
+    df["foc_eq"] = eq.where(~df["is_hidden"])       # hidden rows: the 0-sum is fake
+    df["n_fuels"] = n_fuels.where(~df["is_hidden"])
+    df["foc_eq24"] = df["foc_eq"] / df["HOURS_FULL_SPEED"] * 24
+    fuel_mat = df[FUEL_COLS].fillna(0)
+    df["main_fuel"] = (fuel_mat.idxmax(axis=1)
+                       .where(fuel_mat.max(axis=1) > 0)
+                       .str.replace("ME_FULLSPEED_CONSUMP_", "", regex=False))
+    return df
+
+
+# ================================================================= 3. outliers
+def clean_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """Physical sanity checks + bad-value scrubbing (no rows dropped, only cells NaN'd)."""
+    for c in SLIP_COLS:
+        df.loc[df[c].abs() > 50, c] = np.nan          # S10 shows +/- thousands
+    for c, lo, hi in RANGE_RULES:
+        df.loc[(df[c] <= lo) | (df[c] > hi), c] = np.nan
+    # full speed but no fuel logged => missing, not zero (only non-hidden rows)
+    df.loc[(~df["is_hidden"]) & (df["foc_eq"] <= 0), ["foc_eq", "foc_eq24"]] = np.nan
+    # too few full-speed hours => per-24h extrapolation unreliable => drop target only
+    df.loc[(~df["is_hidden"]) & (df["HOURS_FULL_SPEED"] < MIN_FULLSPEED_HOURS), "foc_eq24"] = np.nan
+    return df
+
+
+# ================================================================= 4. imputation
+def impute_sea_temp(df: pd.DataFrame) -> pd.DataFrame:
+    """Sea temp (~31% missing): per-ship interpolation along the day index, then median."""
+    df = df.sort_values(["De-identification Name", "NOON_UTC"])
+    df["swt_imputed"] = df["SEA_WATER_TEMP"].isna()
+
+    def fill(g):
+        s = g.set_index("NOON_UTC")["SEA_WATER_TEMP"]
+        s = s.interpolate(method="index", limit=45, limit_direction="both")
+        return s.fillna(s.median()).to_numpy()
+
+    df["SEA_WATER_TEMP"] = np.concatenate(
+        [fill(g) for _, g in df.groupby("De-identification Name", sort=False)])
+    return df
+
+
+def impute_displacement(df: pd.DataFrame) -> pd.DataFrame:
+    """Displacement (~31% missing) = cargo + per-ship median(displacement - cargo) offset.
+
+    Recovers the physics feature v3d23/log_v3d23 for rows (incl. PREDICT rows) that
+    would otherwise be dropped by the model's train mask.
+    """
+    offset = df["DISPLACEMENT"] - df["CARGO_ON_BOARD"]
+    ship_off = offset.groupby(df["De-identification Name"]).transform("median")
+    est = df["CARGO_ON_BOARD"] + ship_off.fillna(offset.median())
+    df["disp_imputed"] = df["DISPLACEMENT"].isna() & est.notna()
+    df["DISPLACEMENT"] = df["DISPLACEMENT"].fillna(est)
+    return df
+
+
+# ================================================================= 5. speed check
+def flag_speed_inconsistency(df: pd.DataFrame) -> pd.DataFrame:
+    """Flag STW/SOG gaps that the reported current column does not corroborate."""
+    gap = df["SPEED_THROUGH_WATER"] - df["AVG_SPEED"]
+    df["stw_sog_gap"] = gap
+    corroborated = (df["DIFF_STW_SOG_SLIP"] - gap).abs() <= 1.5
+    df["speed_suspect"] = (gap.abs() > 3) & ~corroborated.fillna(False)
+    return df
+
+
+# ================================================================= 6. derived feats
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df["trim"] = df["AFTER_DRAFT"] - df["FORE_DRAFT"]
+    df["MID_DRAFT"] = df["MID_DRAFT"].fillna((df["FORE_DRAFT"] + df["AFTER_DRAFT"]) / 2)
+    # Admiralty physics term: P ~ displacement^(2/3) * STW^3 (linear in log space)
+    df["v3d23"] = df["SPEED_THROUGH_WATER"] ** 3 * df["DISPLACEMENT"] ** (2 / 3)
+    df["ship_type"] = np.where(df["De-identification Name"].isin(W1_SHIPS), "W1", "W2")
+    df["steady"] = (df["HOURS_FULL_SPEED"] >= MIN_HOURS_FULL_SPEED) & (df["WIND_SCALE"] <= MAX_WIND_SCALE)
+    return df
+
+
+# ================================================================= 7. maintenance
+def align_event_day(maintenance_df: pd.DataFrame) -> pd.DataFrame:
+    """Map calendar event_date onto the NOON_UTC day-index via the fleet epoch.
+
+    NOON_UTC is a per-ship day counter with 0 ~= NOON_UTC_EPOCH, so
+    event_day = (event_date - epoch).days puts both on the same axis.
+    """
+    mt = maintenance_df.copy()
+    mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
+    mt = mt.dropna(subset=["event_date"])
+    mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
+    return mt.sort_values("event_day")
+
+
+def _had_hard_fouling(val) -> int:
+    return int(isinstance(val, str) and any(k in val.lower() for k in HARD_FOULING))
+
+
+def _fouling_severity(val) -> float:
+    if not isinstance(val, str):
+        return 0.0
+    return float(sum(FOULING_SEVERITY.get(f.strip().lower(), 0) for f in val.split(",")))
+
+
+def join_maintenance(df: pd.DataFrame, maintenance_df: pd.DataFrame) -> pd.DataFrame:
+    """Per (ship, day): maintenance clock + last PAST event diagnostics (no leakage)."""
+    mt = align_event_day(maintenance_df)
+    feats = []
+    for ship, g in df.groupby("De-identification Name"):
+        ev = mt[mt["ship_id"] == ship]
+        for day in g["NOON_UTC"]:
+            row = {"De-identification Name": ship, "NOON_UTC": day}
+            past = ev[ev["event_day"] <= day]                       # PAST events only
+            for part, types in RESET.items():
+                sel = past[past["event_type"].isin(types)]
+                row[f"days_since_{part}"] = day - sel["event_day"].iloc[-1] if len(sel) else np.nan
+            phys = past[past["event_type"] != "UWI"]                # UWI = inspection only
+            if len(phys):
+                last = phys.iloc[-1]
+                row["last_event_type"] = last["event_type"]
+                row["last_event_prop_cond"] = last["propeller_condition"]
+                row["last_event_had_hard_fouling"] = _had_hard_fouling(last["hull_fouling_type"])
+                row["fouling_severity_score"] = _fouling_severity(last["hull_fouling_type"])
+            else:
+                row["last_event_type"] = "NONE"
+                row["last_event_prop_cond"] = np.nan
+                row["last_event_had_hard_fouling"] = np.nan
+                row["fouling_severity_score"] = np.nan
+            feats.append(row)
+    return df.merge(pd.DataFrame(feats), on=["De-identification Name", "NOON_UTC"], how="left")
+
+
+# ================================================================= S3 helpers
 def load_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
-    """Load a CSV file from S3 into a pandas DataFrame."""
-    response = s3_client.get_object(Bucket=bucket, Key=key)
-    return pd.read_csv(response["Body"])
-
-
-def validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate data schema and cast columns to appropriate types."""
-    df = df.copy()
-
-    # Rename for consistency
-    df = df.rename(columns={"De-identification Name": "ship_id"})
-
-    # Numeric columns that should be float
-    numeric_cols = [
-        "AVG_SPEED", "SPEED_THROUGH_WATER", "ME_AVG_RPM", "PROPELLER_SPEED",
-        "FORE_DRAFT", "AFTER_DRAFT", "DISPLACEMENT", "CARGO_ON_BOARD",
-        "WIND_SCALE", "SEA_HEIGHT", "SEA_WATER_TEMP", "WIND_SPEED",
-        "WATER_DEPTH", "MID_DRAFT", "TOTAL_DISTANCE", "SEA_SPEED_DISTANCE",
-        "HORSE_POWER", "LOAD_PCT", "SFOC", "ME_SLIP", "THRUST",
-        "THRUST_QUOTIENT", "TOTAL_CONSUMP", "ME_CONSUMPTION",
-        "ME_FULLSPEED_CONSUMP_HSHFO", "ME_FULLSPEED_CONSUMP_ULSFO",
-        "ME_FULLSPEED_CONSUMP_VLSFO", "ME_FULLSPEED_CONSUMP_LSMGO",
-        "ME_FULLSPEED_CONSUMP_BIO_HSFO",
-        "HOURS_FULL_SPEED", "HOURS_TOTAL",
-    ]
-
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Drop rows with critical missing values
-    critical_cols = ["ship_id", "AVG_SPEED", "ME_AVG_RPM", "HOURS_FULL_SPEED"]
-    df = df.dropna(subset=[c for c in critical_cols if c in df.columns])
-
-    logger.info(f"After validation: {len(df)} records remain")
-    return df
-
-
-def filter_weather(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter for calm weather conditions (WIND_SCALE <= 4)."""
-    mask = df["WIND_SCALE"] <= MAX_WIND_SCALE
-    return df[mask].copy()
-
-
-def filter_full_speed(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter for full speed sailing periods (HOURS_FULL_SPEED >= 22)."""
-    mask = df["HOURS_FULL_SPEED"] >= MIN_HOURS_FULL_SPEED
-    return df[mask].copy()
-
-
-def engineer_features(df: pd.DataFrame, maintenance_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Feature engineering pipeline:
-    - Detect active fuel type
-    - Calculate days since last maintenance event
-    - Compute fouling severity score
-    - Calculate power-speed ratio (efficiency indicator)
-    - Derive mid-draft if missing
-    """
-    df = df.copy()
-
-    # 1. Detect active fuel type for each row
-    fuel_cols = [
-        "ME_FULLSPEED_CONSUMP_HSHFO",
-        "ME_FULLSPEED_CONSUMP_ULSFO",
-        "ME_FULLSPEED_CONSUMP_VLSFO",
-        "ME_FULLSPEED_CONSUMP_LSMGO",
-        "ME_FULLSPEED_CONSUMP_BIO_HSFO",
-    ]
-    df["active_fuel_type"] = df[fuel_cols].apply(detect_fuel_type, axis=1)
-    df["me_fullspeed_consump"] = df[fuel_cols].max(axis=1)
-
-    # 2. Days since last maintenance event per ship
-    maintenance_df = preprocess_maintenance(maintenance_df)
-    df["days_since_last_cleaning"] = df.apply(
-        lambda row: calc_days_since_maintenance(
-            row["ship_id"], row.get("NOON_UTC"), maintenance_df, event_type="cleaning"
-        ),
-        axis=1,
-    )
-    df["days_since_last_propeller_polish"] = df.apply(
-        lambda row: calc_days_since_maintenance(
-            row["ship_id"], row.get("NOON_UTC"), maintenance_df, event_type="propeller"
-        ),
-        axis=1,
-    )
-
-    # 3. Fouling severity score from latest inspection
-    df["fouling_severity_score"] = df["ship_id"].apply(
-        lambda sid: get_fouling_severity(sid, maintenance_df)
-    )
-
-    # 4. Hull fouling types (one-hot encoded)
-    df = encode_fouling_types(df, maintenance_df)
-
-    # 5. Power-speed efficiency ratio
-    df["power_speed_ratio"] = np.where(
-        df["SPEED_THROUGH_WATER"] > 0,
-        df["HORSE_POWER"] / df["SPEED_THROUGH_WATER"],
-        np.nan,
-    )
-
-    # 6. Derive mid-draft
-    df["MID_DRAFT"] = df.apply(
-        lambda row: row["MID_DRAFT"]
-        if pd.notna(row.get("MID_DRAFT"))
-        else (row.get("FORE_DRAFT", 0) + row.get("AFTER_DRAFT", 0)) / 2,
-        axis=1,
-    )
-
-    # 7. Trim (draft difference)
-    df["TRIM"] = df["AFTER_DRAFT"] - df["FORE_DRAFT"]
-
-    # 8. Propeller condition encoding from maintenance
-    df["propeller_condition_score"] = df["ship_id"].apply(
-        lambda sid: get_propeller_condition_score(sid, maintenance_df)
-    )
-
-    return df
-
-
-def detect_fuel_type(row: pd.Series) -> str:
-    """Detect which fuel type is active based on consumption values."""
-    fuel_map = {
-        "ME_FULLSPEED_CONSUMP_HSHFO": "HSHFO",
-        "ME_FULLSPEED_CONSUMP_ULSFO": "ULSFO",
-        "ME_FULLSPEED_CONSUMP_VLSFO": "VLSFO",
-        "ME_FULLSPEED_CONSUMP_LSMGO": "LSMGO",
-        "ME_FULLSPEED_CONSUMP_BIO_HSFO": "BIO_HSFO",
-    }
-    for col, fuel_name in fuel_map.items():
-        if col in row.index and pd.notna(row[col]) and row[col] > 0:
-            return fuel_name
-    return "UNKNOWN"
-
-
-def preprocess_maintenance(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse and enrich maintenance dataframe."""
-    df = df.copy()
-    df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
-    df = df.dropna(subset=["event_date"])
-
-    # Classify event types
-    df["is_cleaning"] = df["event_type"].str.contains("UWC|UWI|DD", na=False)
-    df["is_propeller"] = df["event_type"].str.contains("PP", na=False)
-
-    return df
-
-
-def calc_days_since_maintenance(
-    ship_id: str,
-    noon_utc: Optional[int],
-    maintenance_df: pd.DataFrame,
-    event_type: str = "cleaning",
-) -> float:
-    """
-    Calculate days since last maintenance event for a given ship.
-    Uses NOON_UTC as a sequential day index within voyage.
-    Falls back to latest event date if no temporal alignment possible.
-    """
-    col = "is_cleaning" if event_type == "cleaning" else "is_propeller"
-    ship_events = maintenance_df[
-        (maintenance_df["ship_id"] == ship_id) & (maintenance_df[col])
-    ].sort_values("event_date", ascending=False)
-
-    if ship_events.empty:
-        return 999.0  # No maintenance record - assume long overdue
-
-    last_event_date = ship_events.iloc[0]["event_date"]
-    # Use current date as reference since NOON_UTC is a sequence index
-    days_diff = (pd.Timestamp.now() - last_event_date).days
-    return float(max(days_diff, 0))
-
-
-def get_fouling_severity(ship_id: str, maintenance_df: pd.DataFrame) -> float:
-    """
-    Calculate fouling severity score from latest inspection.
-    Score = sum of individual fouling type severities.
-    """
-    ship_events = maintenance_df[
-        (maintenance_df["ship_id"] == ship_id)
-        & (maintenance_df["hull_fouling_type"].notna())
-    ].sort_values("event_date", ascending=False)
-
-    if ship_events.empty:
-        return 0.0
-
-    latest_fouling = ship_events.iloc[0]["hull_fouling_type"]
-    if pd.isna(latest_fouling):
-        return 0.0
-
-    # Parse comma-separated fouling types
-    fouling_types = [f.strip().lower() for f in str(latest_fouling).split(",")]
-    score = sum(FOULING_SEVERITY.get(ft, 0) for ft in fouling_types)
-    return float(score)
-
-
-def encode_fouling_types(df: pd.DataFrame, maintenance_df: pd.DataFrame) -> pd.DataFrame:
-    """One-hot encode fouling types from latest inspection per ship."""
-    fouling_types = ["slime", "algae", "barnacle", "calcium", "tubeworm"]
-
-    for ft in fouling_types:
-        df[f"fouling_{ft}"] = 0
-
-    for ship_id in df["ship_id"].unique():
-        ship_events = maintenance_df[
-            (maintenance_df["ship_id"] == ship_id)
-            & (maintenance_df["hull_fouling_type"].notna())
-        ].sort_values("event_date", ascending=False)
-
-        if ship_events.empty:
-            continue
-
-        latest_fouling = str(ship_events.iloc[0]["hull_fouling_type"]).lower()
-        for ft in fouling_types:
-            if ft in latest_fouling:
-                df.loc[df["ship_id"] == ship_id, f"fouling_{ft}"] = 1
-
-    return df
-
-
-def get_propeller_condition_score(ship_id: str, maintenance_df: pd.DataFrame) -> float:
-    """Encode propeller condition: Good=1, Fair=2, Poor=3, Unknown=0."""
-    condition_map = {"good": 1.0, "fair": 2.0, "poor": 3.0}
-
-    ship_events = maintenance_df[
-        (maintenance_df["ship_id"] == ship_id)
-        & (maintenance_df["propeller_condition"].notna())
-    ].sort_values("event_date", ascending=False)
-
-    if ship_events.empty:
-        return 0.0
-
-    condition = str(ship_events.iloc[0]["propeller_condition"]).strip().lower()
-    return condition_map.get(condition, 0.0)
+    """Load a CSV from S3 as strings (dtype=str) so HIDDEN/PREDICT markers survive."""
+    response = s3().get_object(Bucket=bucket, Key=key)
+    return pd.read_csv(response["Body"], dtype=str)
 
 
 def generate_output_key(input_key: str) -> str:
-    """Generate output S3 key with timestamp."""
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     base_name = os.path.splitext(os.path.basename(input_key))[0]
     return f"processed/{base_name}_cleaned_{timestamp}.parquet"
 
 
 def save_to_s3(df: pd.DataFrame, bucket: str, key: str):
-    """Save DataFrame to S3 as Parquet for efficient downstream processing."""
-    import io
-
     buffer = io.BytesIO()
     df.to_parquet(buffer, index=False, engine="pyarrow")
     buffer.seek(0)
-
-    s3_client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=buffer.getvalue(),
-        ContentType="application/octet-stream",
-    )
+    s3().put_object(Bucket=bucket, Key=key, Body=buffer.getvalue(),
+                    ContentType="application/octet-stream")
