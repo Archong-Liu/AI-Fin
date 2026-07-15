@@ -245,7 +245,6 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             {FIT_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
           </select>
         </label>
-        <span className="faint">點趨勢線可看公式與 R²</span>
         <span className="btns">
           <button onClick={() => zoomAt(1 / 1.4)} aria-label="放大">＋</button>
           <button onClick={() => zoomAt(1.4)} aria-label="縮小">−</button>
