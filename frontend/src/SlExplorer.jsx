@@ -68,8 +68,8 @@ function fitInterval(pts, type, Tspan) {
     if (!c) return null
     const ev = t => c.reduce((a, ck, k) => a + ck * u(t) ** k, 0)
     const a = c.map((ck, k) => ck / Tspan ** k) // 換回 t 係數供顯示
-    const terms = a.map((ak, k) => k === 0 ? `${fmt(ak)}` : `${fmt(ak)}·t${k > 1 ? `^${k}` : ''}`)
-    return { eval: ev, formula: `SL(t) = ${terms.join(' + ')}`, r2: r2Of(pts, ev) }
+    const expr = a.map((ak, k) => k === 0 ? { t: 'num', v: ak } : { t: 'pow', coef: ak, pow: k })
+    return { eval: ev, expr, r2: r2Of(pts, ev) }
   }
   if (type === 'exp') {
     const pos = pts.filter(p => p.v > 0.05)
@@ -77,7 +77,7 @@ function fitInterval(pts, type, Tspan) {
     const c = lstsq(pos.map(p => ({ t: p.t, v: Math.log(p.v) })), [() => 1, t => t])
     if (!c) return null
     const ev = t => Math.exp(c[0] + c[1] * t)
-    return { eval: ev, formula: `SL(t) = ${fmt(Math.exp(c[0]))}·e^(${fmt(c[1])}·t)`, r2: r2Of(pts, ev) }
+    return { eval: ev, expr: [{ t: 'exp', a: Math.exp(c[0]), b: c[1] }], r2: r2Of(pts, ev) }
   }
   if (type === 'fourier') {
     // 離散傅立葉變換：實測日不等距 → 線性內插到均勻網格 → 樸素 DFT（N=64 夠快）
@@ -104,15 +104,40 @@ function fitInterval(pts, type, Tspan) {
     }
     const top = comps.sort((a, b) => b.A - a.A).slice(0, K).sort((a, b) => a.k - b.k)
     const ev = t => top.reduce((s, c) => s + c.A * Math.cos(2 * Math.PI * c.k * t / Tspan + c.ph), a0)
-    const terms = top.map(c =>
-      `${fmt(c.A)}·cos(2πt/${Math.round(Tspan / c.k)} ${c.ph >= 0 ? '+' : '−'} ${Math.abs(c.ph).toFixed(2)})`)
-    return {
-      eval: ev,
-      formula: `SL(t) = ${fmt(a0)} + ${terms.join(' + ')}　｜DFT N=${N}·取振幅前 ${K} 諧波·cos 內分母＝週期（天）`,
-      r2: r2Of(pts, ev),
-    }
+    const expr = [{ t: 'num', v: a0 },
+      ...top.map(c => ({ t: 'cos', A: c.A, period: Math.round(Tspan / c.k), phase: c.ph }))]
+    return { eval: ev, expr, r2: r2Of(pts, ev) }
   }
   return null
+}
+
+/* ===== 公式排版：結構化項次 → 數學式（分數疊排/上標/係數上色，不用外部庫） ===== */
+function Formula({ expr }) {
+  const lead = (i, v) => i === 0
+    ? (v < 0 ? <span className="op">−</span> : null)
+    : <span className="op">{v < 0 ? '−' : '+'}</span>
+  return (
+    <span className="formula">
+      <i>SL(t)</i><span className="op">=</span>
+      {expr.map((e, i) => {
+        if (e.t === 'num') return <span className="term" key={i}>{lead(i, e.v)}<b>{fmt(Math.abs(e.v))}</b></span>
+        if (e.t === 'pow') return (
+          <span className="term" key={i}>{lead(i, e.coef)}<b>{fmt(Math.abs(e.coef))}</b>·<i>t</i>{e.pow > 1 && <sup>{e.pow}</sup>}</span>
+        )
+        if (e.t === 'exp') return (
+          <span className="term" key={i}>{lead(i, e.a)}<b>{fmt(Math.abs(e.a))}</b>·<span className="fn">e</span><sup>{fmt(e.b)}·t</sup></span>
+        )
+        if (e.t === 'cos') return (
+          <span className="term" key={i}>
+            {lead(i, e.A)}<b>{fmt(Math.abs(e.A))}</b>·<span className="fn">cos</span>(
+            <span className="frac"><span>2π<i>t</i></span><span>{e.period}</span></span>
+            <span className="op">{e.phase < 0 ? '−' : '+'}</span>{Math.abs(e.phase).toFixed(2)})
+          </span>
+        )
+        return null
+      })}
+    </span>
+  )
 }
 
 export default function SlExplorer({ ship, thr, win, setWin }) {
@@ -253,7 +278,7 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>
             <button onClick={() => setSelCurve(null)} aria-label="關閉">×</button>
           </div>
-          <code>{selCurve.formula}</code>
+          <div className="formula-row"><Formula expr={selCurve.expr} /></div>
         </div>
       )}
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
@@ -303,7 +328,7 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
             )
           })
         })()}
-        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="2.7" fill="var(--text)" opacity=".85" />)}
+        {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="2" fill="var(--text)" opacity=".8" />)}
         {curves.map((c, i) => {
           const d = curvePath(c)
           if (!d) return null

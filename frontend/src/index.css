@@ -240,7 +240,16 @@ svg text{font-family:var(--font-data);font-size:12px;fill:var(--faint)}
 .fit-info .fi-head b{color:var(--text)}
 .fit-info .fi-r2{font-family:var(--font-data);font-weight:600;color:var(--accent)}
 .fit-info .fi-head button{margin-left:auto;border:0;background:transparent;color:var(--faint);font-size:20px;line-height:1;padding:0 4px}
-.fit-info code{display:block;margin-top:8px;font-family:var(--font-data);font-size:15.6px;color:var(--text);word-break:break-all;line-height:1.6}
+.formula-row{margin-top:10px;overflow-x:auto}
+.formula{font-family:var(--font-data);font-size:16.8px;color:var(--text);display:inline-flex;align-items:center;flex-wrap:wrap;row-gap:6px;line-height:1.7;white-space:nowrap}
+.formula i{font-style:italic;font-weight:700}
+.formula .op{color:var(--faint);font-weight:600;padding:0 7px}
+.formula .term{display:inline-flex;align-items:center}
+.formula .term b{color:var(--accent);font-weight:700}
+.formula .fn{color:var(--muted);font-weight:600;padding:0 1px}
+.formula sup{font-size:12px;transform:translateY(-2px)}
+.formula .frac{display:inline-flex;flex-direction:column;align-items:center;line-height:1.25;margin:0 4px;font-size:14.4px;vertical-align:middle}
+.formula .frac span:first-child{border-bottom:1.5px solid var(--text);padding:0 5px}
 .sl-thumb{position:absolute;top:-1px;bottom:-1px;background:var(--accent);opacity:.4;min-width:14px;cursor:grab;touch-action:none}
 .sl-thumb:hover{opacity:.55}
 .sl-thumb:active{cursor:grabbing;opacity:.6}
