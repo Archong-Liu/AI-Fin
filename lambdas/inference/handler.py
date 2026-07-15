@@ -9,6 +9,7 @@ to the processed-data bucket. Steps:
 3. Write results JSON to the results-json/ prefix for the dashboard to consume:
      - results-json/submission.json   (canonical 102 masked-window predictions)
      - results-json/fleet_data.json   (full fleet daily dataset + predicted_mt merged)
+     - results-json/speed_loss.json   (ISO 19030 speed loss — single source of truth)
 
 The model is a scikit-learn based custom class (ml.training.model.HybridModel). The
 image bakes in ml/training/ so joblib can unpickle it, and pins the exact training
@@ -27,6 +28,7 @@ import pandas as pd
 
 from ml.training import config as C
 from ml.training import model as M
+from ml import speed_loss as SL
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,9 +63,7 @@ VALIDATION = {
     "rmse_mt_per_day": 3.5,
 }
 
-# Maintenance types that reset the hull/performance baseline (UWI is inspection-only).
-HULL_EVENTS = {"DD", "UWC", "PP", "UWC+PP", "UWI+PP"}
-DAY_MAX = 1825  # ~5-year day-index horizon
+
 
 
 # ============================================================== Lambda entry point
@@ -76,19 +76,25 @@ def lambda_handler(event, context):
         key = record["s3"]["object"]["key"]
         logger.info(f"Processing processed parquet s3://{bucket}/{key}")
 
-        # 1. Load processed data (ETL output) + model
+        # 1. Load processed data (ETL output) + model + aligned maintenance
         df = load_processed_from_s3(bucket, key)
         mdl = load_model()
-        logger.info(f"Loaded {len(df)} processed rows + model")
+        mt_df = load_maintenance_df()
+        logger.info(f"Loaded {len(df)} processed rows + model + {len(mt_df)} maintenance events")
 
         # 2. Predict the masked-window cells (the canonical submission)
         submission = M.predict_submission(mdl, df)
         logger.info(f"Generated {len(submission)} predictions")
 
-        # 3. Build outputs and write to results-json/
+        # 3. Fleet dataset (daily + predicted_mt) and submission
         write_json(submission_payload(submission), f"{RESULTS_PREFIX}/submission.json")
-        fleet = build_fleet_data(df, mdl, submission)
+        fleet = build_fleet_data(df, submission, mt_df)
         write_json(fleet, f"{RESULTS_PREFIX}/fleet_data.json")
+
+        # 4. ISO 19030 speed loss (single source of truth for the dashboard)
+        sl_payload = SL.compute(df, mt_df)
+        write_json(sl_payload, f"{RESULTS_PREFIX}/speed_loss.json")
+        logger.info(f"Computed ISO 19030 speed loss for {len(sl_payload.get('fleet_summary', []))} ships")
 
         return {
             "statusCode": 200,
@@ -98,6 +104,7 @@ def lambda_handler(event, context):
                 "results": [
                     f"s3://{PROCESSED_BUCKET}/{RESULTS_PREFIX}/submission.json",
                     f"s3://{PROCESSED_BUCKET}/{RESULTS_PREFIX}/fleet_data.json",
+                    f"s3://{PROCESSED_BUCKET}/{RESULTS_PREFIX}/speed_loss.json",
                 ],
             }),
         }
@@ -215,91 +222,44 @@ def submission_payload(submission: pd.DataFrame) -> dict:
     }
 
 
-# ================================================================= speed loss
-def _median(a: list) -> float:
-    s = sorted(a)
-    return s[len(s) // 2] if s else float("nan")
+# ================================================================= maintenance
+def load_maintenance_df() -> pd.DataFrame:
+    """Load maintenance CSV and align to integer event_day (prefer event_day, else map
+    calendar event_date via the fleet epoch). Returns the aligned DataFrame; empty on error."""
+    try:
+        obj = s3().get_object(Bucket=RAW_BUCKET, Key=MAINTENANCE_KEY)
+        mt = pd.read_csv(io.BytesIO(obj["Body"].read()))
+    except Exception as e:
+        logger.warning(f"maintenance load skipped: {e}")
+        return pd.DataFrame(columns=["ship_id", "event_type", "event_day"])
+
+    if "event_day" in mt.columns:
+        mt["event_day"] = pd.to_numeric(mt["event_day"], errors="coerce")
+        mt = mt.dropna(subset=["event_day"])
+        mt["event_day"] = mt["event_day"].astype(int)
+    else:
+        mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
+        mt = mt.dropna(subset=["event_date"])
+        mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
+    return mt.sort_values("event_day")
 
 
-def _fit_seg(days: list, vals: list) -> dict:
-    """Least-squares line over a maintenance interval -> trend segment endpoints."""
-    n = len(days)
-    sx, sy = sum(days), sum(vals)
-    sxx = sum(d * d for d in days)
-    sxy = sum(d * v for d, v in zip(days, vals))
-    den = n * sxx - sx * sx
-    b = (n * sxy - sx * sy) / den if den else 0.0
-    a = sy / n - b * (sx / n)
-    d0, d1 = days[0], days[-1]
-    return {"d0": int(d0), "d1": int(d1),
-            "p0": round(max(0.0, a + b * d0), 3), "p1": round(max(0.0, a + b * d1), 3)}
-
-
-def compute_speed_loss(g: pd.DataFrame, events: list) -> "dict | None":
-    """Backend Speed-Loss proxy (authoritative source for the dashboard's tier-1 path).
-
-    Mirrors the previously-validated frontend derivation so the numbers are consistent:
-    comparability filter (modal speed band +/-1.5kn, displacement median +/-25%),
-    Admiralty normalisation idx = foc_eq24 / (displacement^(2/3) * STW^3), a clean
-    baseline from the lowest quartile of each post-maintenance window's early days, and
-    a 7-point rolling median. Returns the DATA_CONTRACT `speed_loss` block or None when
-    a ship lacks enough comparable steady days (frontend then falls back gracefully).
-    """
-    steady = g["steady"].fillna(False) if "steady" in g else False
-    sub = g[steady & g["foc_eq24"].notna()
-            & (g["SPEED_THROUGH_WATER"] > 8) & g["DISPLACEMENT"].notna()].sort_values("day")
-    if len(sub) < 20:
-        return None
-
-    mode = sub["SPEED_THROUGH_WATER"].round().value_counts().idxmax()
-    rows = sub[(sub["SPEED_THROUGH_WATER"] - mode).abs() <= 1.5]
-    disp_med = rows["DISPLACEMENT"].median()
-    if disp_med and disp_med > 0:
-        rows = rows[((rows["DISPLACEMENT"] - disp_med).abs() / disp_med) <= 0.25]
-    if len(rows) < 20:
-        rows = sub
-    rows = rows.sort_values("day").to_dict("records")
-
-    def idx(r):
-        return r["foc_eq24"] / ((r["DISPLACEMENT"] ** (2 / 3)) * r["SPEED_THROUGH_WATER"] ** 3) * 1e9
-
-    ev_days = sorted(int(e["event_day"]) for e in events)
-    bounds = [0, *ev_days, DAY_MAX + 1]
-    points, segments = [], []
-    for bi in range(len(bounds) - 1):
-        seg = [r for r in rows if bounds[bi] <= r["day"] < bounds[bi + 1]]
-        if len(seg) < 5:
-            continue
-        idxs = [idx(r) for r in seg]
-        early = sorted(idxs[:max(5, len(seg) // 5)])
-        k = max(2, len(early) // 4)
-        base = sum(early[:k]) / k
-        if base <= 0:
-            continue
-        raw = [max(0.0, (v / base - 1) * 100) for v in idxs]
-        seg_days = [int(r["day"]) for r in seg]
-        seg_v = [_median(raw[max(0, n - 3):n + 4]) for n in range(len(seg))]
-        points.extend({"day": d, "pct": round(v, 3)} for d, v in zip(seg_days, seg_v))
-        if len(seg) >= 3:
-            segments.append(_fit_seg(seg_days, seg_v))
-
-    if len(points) < 20:
-        return None
-    current = _median([p["pct"] for p in points[-15:]])
-    return {
-        "method": "admiralty-proxy-v1",
-        "current_pct": round(current, 3),
-        "points": points,
-        "segments": segments,
-    }
+def _maintenance_by_ship(mt: pd.DataFrame) -> dict:
+    """Group the aligned maintenance frame into per-ship record lists for fleet_data."""
+    out = {}
+    if mt.empty:
+        return out
+    for ship_id, g in mt.groupby("ship_id"):
+        out[ship_id] = json.loads(g.to_json(orient="records"))
+    return out
 
 
 # ================================================================= fleet dataset
-def build_fleet_data(df: pd.DataFrame, mdl, submission: pd.DataFrame) -> dict:
+def build_fleet_data(df: pd.DataFrame, submission: pd.DataFrame, mt_df: pd.DataFrame) -> dict:
     """Full fleet daily dataset with predicted_mt merged in, grouped per ship.
 
-    Mirrors the ML team's fleet_data.json structure so the dashboard can consume it.
-    Weather-vector columns are derived here if the source columns are present.
+    Carries daily rows + maintenance + predicted_mt. Speed loss is NO LONGER emitted
+    here — the ISO 19030 `speed_loss.json` (see SL.compute) is the single source of truth.
     """
     df = df.copy()
 
@@ -314,28 +274,20 @@ def build_fleet_data(df: pd.DataFrame, mdl, submission: pd.DataFrame) -> dict:
         for _, row in df.iterrows()
     ]
 
-    maintenance_by_ship = load_maintenance_by_ship()
+    maintenance_by_ship = _maintenance_by_ship(mt_df)
 
     ships = []
     for ship_id, g in df.groupby("ship", sort=True):
         g = g.sort_values("day")
         daily = json.loads(g.to_json(orient="records"))  # NaN -> null, native types
-        maint = maintenance_by_ship.get(ship_id, [])
-        hull_events = [e for e in maint
-                       if e.get("event_type") in HULL_EVENTS and e.get("event_day") is not None]
-        speed_loss = compute_speed_loss(g, hull_events)  # None if insufficient data
         ships.append({
             "ship_id": ship_id,
             "ship_type": g["ship_type"].iloc[0] if "ship_type" in g else None,
             "n_days": int(len(g)),
             "n_predictions": int(g["predict_fuel"].notna().sum()),
-            "maintenance": maint,
-            "speed_loss": speed_loss,
+            "maintenance": maintenance_by_ship.get(ship_id, []),
             "daily": daily,
         })
-
-    n_sl = sum(1 for s in ships if s["speed_loss"])
-    logger.info(f"Computed speed_loss for {n_sl}/{len(ships)} ships")
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -348,39 +300,6 @@ def build_fleet_data(df: pd.DataFrame, mdl, submission: pd.DataFrame) -> dict:
         "daily_columns": list(df.columns),
         "ships": ships,
     }
-
-
-def load_maintenance_by_ship() -> dict:
-    """Read maintenance CSV, align event_date -> day-index, group per ship.
-
-    Best-effort: if the maintenance file is missing, returns empty (fleet_data still
-    valid, just without maintenance events).
-    """
-    try:
-        obj = s3().get_object(Bucket=RAW_BUCKET, Key=MAINTENANCE_KEY)
-        mt = pd.read_csv(io.BytesIO(obj["Body"].read()))
-    except Exception as e:
-        logger.warning(f"maintenance load skipped: {e}")
-        return {}
-
-    # Prefer the exact integer event_day (same per-ship day-index as NOON_UTC); fall
-    # back to mapping a calendar event_date via the fleet epoch. Mirrors the ETL
-    # handler's align_event_day so both stages agree on the maintenance timeline.
-    if "event_day" in mt.columns:
-        mt["event_day"] = pd.to_numeric(mt["event_day"], errors="coerce")
-        mt = mt.dropna(subset=["event_day"])
-        mt["event_day"] = mt["event_day"].astype(int)
-        mt = mt.sort_values("event_day")
-    else:
-        mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
-        mt = mt.dropna(subset=["event_date"])
-        mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
-        mt = mt.drop(columns=["event_date"]).sort_values("event_day")
-
-    out = {}
-    for ship_id, g in mt.groupby("ship_id"):
-        out[ship_id] = json.loads(g.to_json(orient="records"))
-    return out
 
 
 # ================================================================= S3 write

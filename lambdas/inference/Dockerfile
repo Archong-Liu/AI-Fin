@@ -11,8 +11,10 @@ FROM public.ecr.aws/lambda/python:3.13
 COPY lambdas/inference/requirements.txt ${LAMBDA_TASK_ROOT}/
 RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
-# Bake in the ML training package so joblib can resolve ml.training.model.HybridModel
+# Bake in the ML training package (for unpickling HybridModel) + the ISO 19030
+# speed-loss module (compute() is import-light: numpy/pandas only).
 COPY ml/training/ ${LAMBDA_TASK_ROOT}/ml/training/
+COPY ml/speed_loss.py ${LAMBDA_TASK_ROOT}/ml/speed_loss.py
 RUN touch ${LAMBDA_TASK_ROOT}/ml/__init__.py
 
 # Handler code

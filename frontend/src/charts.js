@@ -79,13 +79,26 @@ export function focChart(ship) {
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗對比">${bars}<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"/>${labels}</svg>`
 }
 
+// primary_cause（ml/speed_loss.py attribution()）→ 中文標籤
+const CAUSE_TXT = {
+  HULL_FOULING: '船體汙損為主', PROPELLER_ROUGHNESS: '螺槳粗糙為主',
+  COMBINED: '船體＋螺槳混合', INDETERMINATE: '推力資料不足，無法歸因', CLEAN: '目前無明顯損失',
+}
+
 export function attrDonut(ship) {
-  const hull = Math.min(82, 45 + ship.sl * 4)
-  const prop = Math.min(30, 10 + ship.sl * 1.5, 96 - hull)
-  const other = 100 - hull - prop
+  // 後台已有推力法歸因（ISO 19030 §4.3）時優先採用真實值；INDETERMINATE/CLEAN（無推力計）或
+  // derived/demo 資料時退回前端估算公式，並在下方註明來源避免誤認為模型輸出
+  const attr = ship.attribution
+  const real = attr && typeof attr.hull_contribution_pct === 'number'
+  const hull = real ? attr.hull_contribution_pct : Math.min(82, 45 + ship.sl * 4)
+  const prop = real ? attr.propeller_contribution_pct : Math.min(30, 10 + ship.sl * 1.5, 96 - hull)
+  const other = Math.max(0, 100 - hull - prop)
   const C = 2 * Math.PI * 44
   const seg = (pct, off, color) => `<circle cx="60" cy="60" r="44" fill="none" stroke="${color}" stroke-width="14"
     stroke-dasharray="${((pct / 100) * C).toFixed(1)} ${C}" stroke-dashoffset="${((-off / 100) * C).toFixed(1)}" transform="rotate(-90 60 60)"/>`
+  const caption = real
+    ? `依 ISO 19030 推力法歸因（近 ${attr.window_days} 個航行日）· ${CAUSE_TXT[attr.primary_cause] ?? attr.primary_cause}`
+    : (attr ? `${CAUSE_TXT[attr.primary_cause] ?? '推力資料不足'}，以下為前端估算值` : '前端估算值（無後台歸因資料）')
   return `<svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="損失歸因">
       ${seg(hull, 0, 'var(--crit)')}${seg(prop, hull, 'var(--watch)')}${seg(other, hull + prop, 'var(--chart-grid)')}
       <text x="60" y="57" text-anchor="middle" style="font-size:22.8px;font-weight:600;fill:var(--text)">${hull.toFixed(0)}%</text>
@@ -93,7 +106,8 @@ export function attrDonut(ship) {
     <div style="font-size:15px;color:var(--muted);line-height:2">
       <span style="color:var(--crit)">●</span> 船體汙損 ${hull.toFixed(0)}%<br>
       <span style="color:var(--watch)">●</span> 螺槳 ${prop.toFixed(0)}%<br>
-      <span style="color:var(--faint)">●</span> 其他 ${other.toFixed(0)}%</div>`
+      <span style="color:var(--faint)">●</span> 其他 ${other.toFixed(0)}%
+      <div style="font-size:12px;margin-top:4px">${caption}</div></div>`
 }
 
 // 每日油耗歸因 — 成分堆疊柱狀圖（乾淨基準+風阻+吃水+船體汙損+螺槳＝當日實測 FOC）

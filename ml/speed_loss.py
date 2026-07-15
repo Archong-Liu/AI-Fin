@@ -30,12 +30,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# NOTE: `compute()` depends only on numpy/pandas so it can be imported by the inference
+# Lambda (which passes in the ETL frame + aligned maintenance directly). The ETL/model
+# imports used only by the CLI live inside main() to keep this module import-light.
 ROOT = Path(__file__).resolve().parent.parent          # AI-Fin/
-sys.path.insert(0, str(ROOT))
-
-from lambdas.etl import handler                          # noqa: E402
-from ml.training import model                            # noqa: E402
-
 RAW = ROOT / "data" / "raw"
 EXAMPLES = ROOT / "ml" / "examples"
 
@@ -373,6 +371,9 @@ def compute(df: pd.DataFrame, mt: pd.DataFrame) -> dict:
 
 
 def main() -> None:
+    sys.path.insert(0, str(ROOT))
+    from lambdas.etl import handler                       # noqa: E402
+    from ml.training import model                         # noqa: E402
     voyage = pd.read_csv(RAW / "vt_fd.csv", dtype=str)
     maint_raw = pd.read_csv(RAW / "maintenance.csv", dtype=str)
     df = model.add_derived(handler.run_etl(voyage, maint_raw))
