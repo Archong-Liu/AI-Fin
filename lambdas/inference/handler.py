@@ -179,10 +179,19 @@ def load_maintenance_by_ship() -> dict:
         logger.warning(f"maintenance load skipped: {e}")
         return {}
 
-    mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
-    mt = mt.dropna(subset=["event_date"])
-    mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
-    mt = mt.drop(columns=["event_date"]).sort_values("event_day")
+    # Prefer the exact integer event_day (same per-ship day-index as NOON_UTC); fall
+    # back to mapping a calendar event_date via the fleet epoch. Mirrors the ETL
+    # handler's align_event_day so both stages agree on the maintenance timeline.
+    if "event_day" in mt.columns:
+        mt["event_day"] = pd.to_numeric(mt["event_day"], errors="coerce")
+        mt = mt.dropna(subset=["event_day"])
+        mt["event_day"] = mt["event_day"].astype(int)
+        mt = mt.sort_values("event_day")
+    else:
+        mt["event_date"] = pd.to_datetime(mt["event_date"], errors="coerce")
+        mt = mt.dropna(subset=["event_date"])
+        mt["event_day"] = (mt["event_date"] - NOON_UTC_EPOCH).dt.days
+        mt = mt.drop(columns=["event_date"]).sort_values("event_day")
 
     out = {}
     for ship_id, g in mt.groupby("ship_id"):
