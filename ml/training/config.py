@@ -24,9 +24,12 @@ NUM_FEATS = [
     "DIFF_STW_SOG_SLIP",     # reported current proxy
     "FULL_SPD_STW_SLIP",     # slip (fouling signal, visible inside masked windows)
     "days_since_hull", "days_since_prop", "days_since_dd",   # maintenance clock
-    "last_event_had_hard_fouling", "fouling_severity_score",
+    "last_event_had_hard_fouling",
     "HOURS_FULL_SPEED",
 ]
+# NOTE: `fouling_severity_score` is computed by the ETL and kept in the output for the
+# dashboard, but is intentionally NOT a model feature: it did not move accuracy (see
+# ml-eda doc) and excluding it makes this pipeline reproduce the submission exactly.
 
 # Categorical features (HistGradientBoosting handles these natively via dtype).
 CAT_FEATS = ["ship", "ship_type", "last_event_type", "last_event_prop_cond"]
