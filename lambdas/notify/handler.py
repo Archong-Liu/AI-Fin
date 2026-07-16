@@ -6,13 +6,27 @@ email for a given ship and sends it via Amazon SES. User-initiated (trigger mode
 the dashboard supplies the ship context it already has, so this Lambda stays light
 (boto3 only, no data/model dependencies).
 
-Request body (JSON):
+Request body (JSON) -- two mutually exclusive modes:
+
+    Single-ship alert (FleetView's over-threshold banner):
     {
       "ship_id":         "S1",              # required
       "current_pct":     6.9,               # optional — current Speed Loss %
       "days_since_hull": 180,               # optional — days since last hull clean
       "recipients":      ["a@b.com"],       # optional — defaults to SES_RECIPIENT
       "note":            "free text"        # optional — extra body line
+    }
+
+    Fleet report (DataView's "寄送給輪機部門" -- one email, laid out like the on-screen
+    report card: ①摘要/②優先處理建議表/③模型依據 -- instead of one email per ship):
+    {
+      "report": {
+        "title":   "船隊船體能效月報",
+        "summary": "...",                             # ①摘要
+        "rows":    [{"ship_id","sl_pct","penalty_t_day","action","buffer"}, ...],  # ②表格
+        "basis":   "..."                               # ③模型依據
+      },
+      "recipients": ["a@b.com"]             # optional — defaults to SES_RECIPIENT
     }
 
 SES note: the sender must be a verified identity; in sandbox recipients must be
@@ -56,16 +70,22 @@ def lambda_handler(event, context):
         if event.get("isBase64Encoded"):
             raw = base64.b64decode(raw).decode("utf-8")
         p = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(p, dict) or not p.get("ship_id"):
-            return _resp(400, {"error": "body must be a JSON object with ship_id"})
+        if not isinstance(p, dict):
+            return _resp(400, {"error": "body must be a JSON object"})
 
         recipients = p.get("recipients") or [SES_RECIPIENT]
-        subject, html, text = compose(
-            ship=p["ship_id"],
-            current_pct=p.get("current_pct"),
-            days_since_hull=p.get("days_since_hull"),
-            note=p.get("note", ""),
-        )
+
+        if p.get("report"):
+            subject, html, text = compose_report(p["report"])
+        elif p.get("ship_id"):
+            subject, html, text = compose(
+                ship=p["ship_id"],
+                current_pct=p.get("current_pct"),
+                days_since_hull=p.get("days_since_hull"),
+                note=p.get("note", ""),
+            )
+        else:
+            return _resp(400, {"error": "body must include either ship_id or report"})
 
         result = ses().send_email(
             Source=f"{SENDER_NAME} <{SES_SENDER}>",
@@ -108,6 +128,52 @@ def compose(ship: str, current_pct, days_since_hull, note: str):
         '</table>'
         + (f'<p>{note}</p>' if note else "")
         + '<hr><small>YMINSIGHT 智慧船舶效能監控與跨部門排程協調系統</small>'
+        '</body></html>'
+    )
+    return subject, html, text
+
+
+def compose_report(report: dict):
+    """One consolidated email laid out like DataView's on-screen report card
+    (①摘要/②優先處理建議表/③模型依據) -- not one email per ship."""
+    title = report.get("title") or "船隊船體能效月報"
+    summary = report.get("summary") or ""
+    basis = report.get("basis") or ""
+    rows = report.get("rows") or []
+
+    subject = f"[YMINSIGHT] {title}"
+
+    row_lines = "\n".join(
+        f"  {r.get('ship_id', '')}\t{r.get('sl_pct', '')}%\t+{r.get('penalty_t_day', '')} t/d\t"
+        f"{r.get('action', '')}\t{r.get('buffer', '')}"
+        for r in rows
+    )
+    text = (
+        f"{title}\n{'=' * len(title)}\n\n"
+        f"① 摘要\n{summary}\n\n"
+        f"② 優先處理建議\n{row_lines}\n\n"
+        f"③ 模型依據\n{basis}\n\n"
+        "— YMINSIGHT 智慧船舶效能監控\n"
+    )
+
+    row_html = "".join(
+        f'<tr><td>{r.get("ship_id", "")}</td><td>{r.get("sl_pct", "")}%</td>'
+        f'<td>{r.get("penalty_t_day", "")} t/d</td><td>{r.get("action", "")}</td>'
+        f'<td>{r.get("buffer", "")}</td></tr>'
+        for r in rows
+    )
+    html = (
+        '<html><body style="font-family:sans-serif;color:#1a2b3c;max-width:640px">'
+        f'<h2>{title}</h2>'
+        f'<h4>① 摘要</h4><p>{summary}</p>'
+        '<h4>② 優先處理建議</h4>'
+        '<table cellpadding="6" style="border-collapse:collapse;width:100%">'
+        '<tr style="text-align:left;color:#5a7186">'
+        '<th>船名</th><th>Speed Loss</th><th>額外油耗</th><th>建議</th><th>調度緩衝期</th></tr>'
+        f'{row_html}'
+        '</table>'
+        f'<h4>③ 模型依據</h4><p>{basis}</p>'
+        '<hr><small>YMINSIGHT 智慧船舶效能監控與跨部門排程協調系統</small>'
         '</body></html>'
     )
     return subject, html, text

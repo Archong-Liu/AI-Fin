@@ -1,5 +1,5 @@
 // 互動式 Speed Loss 主圖：拖曳平移、滾輪/按鈕縮放、底部時間軸捲動條、
-// 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/傅立葉），點曲線看公式與 R²。
+// 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/逐點連線），點曲線看公式與 R²。
 // 資料一律走 useShipSeries（api.js 銜接層產出），mock 船才用 charts.js 產生器。
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { dailySeries, dateOf } from './charts.js'
@@ -54,7 +54,7 @@ export const FIT_TYPES = [
   ['poly2', '二次多項式 Poly-2'],
   ['poly3', '三次多項式 Poly-3'],
   ['exp', '指數 Exponential'],
-  ['fourier', '傅立葉 DFT'],
+  ['connect', '逐點連線 Point-to-Point'],
 ]
 
 // pts:[{t,v}]（t=距區間起點天數）→ { eval, formula, r2 }；擬合失敗回 null
@@ -79,34 +79,20 @@ function fitInterval(pts, type, Tspan) {
     const ev = t => Math.exp(c[0] + c[1] * t)
     return { eval: ev, expr: [{ t: 'exp', a: Math.exp(c[0]), b: c[1] }], r2: r2Of(pts, ev) }
   }
-  if (type === 'fourier') {
-    // 離散傅立葉變換：實測日不等距 → 線性內插到均勻網格 → 樸素 DFT（N=64 夠快）
-    // → 取振幅前 K 大的諧波做截斷重建（低通近似）
-    if (pts.length < 8) return null
-    const N = 64, K = 4
-    const xs = new Array(N)
-    let j = 0
-    for (let i = 0; i < N; i++) {
-      const t = Tspan * i / N
-      while (j < pts.length - 2 && pts[j + 1].t < t) j++
-      const a = pts[j], b = pts[Math.min(j + 1, pts.length - 1)]
-      xs[i] = b.t > a.t ? a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t) : a.v
+  if (type === 'connect') {
+    // 逐點直線連接：不做回歸/週期性假設，永遠貼合實測值本身——汙損累積是單向趨勢，
+    // 傅立葉的週期諧波重建反而會生出資料裡沒有的擺動，不如直接連線誠實。
+    if (pts.length < 2) return null
+    const sorted = [...pts].sort((a, b) => a.t - b.t)
+    const ev = t => {
+      if (t <= sorted[0].t) return sorted[0].v
+      if (t >= sorted[sorted.length - 1].t) return sorted[sorted.length - 1].v
+      let i = 0
+      while (i < sorted.length - 2 && sorted[i + 1].t < t) i++
+      const a = sorted[i], b = sorted[i + 1]
+      return b.t > a.t ? a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t) : a.v
     }
-    const a0 = xs.reduce((s, x) => s + x, 0) / N
-    const comps = []
-    for (let k = 1; k <= N / 2 - 1; k++) { // X_k = Σ x_n·e^(−i2πkn/N)
-      let re = 0, im = 0
-      for (let n = 0; n < N; n++) {
-        const ang = 2 * Math.PI * k * n / N
-        re += xs[n] * Math.cos(ang); im -= xs[n] * Math.sin(ang)
-      }
-      comps.push({ k, A: 2 * Math.hypot(re, im) / N, ph: Math.atan2(im, re) })
-    }
-    const top = comps.sort((a, b) => b.A - a.A).slice(0, K).sort((a, b) => a.k - b.k)
-    const ev = t => top.reduce((s, c) => s + c.A * Math.cos(2 * Math.PI * c.k * t / Tspan + c.ph), a0)
-    const expr = [{ t: 'num', v: a0 },
-      ...top.map(c => ({ t: 'cos', A: c.A, period: Math.round(Tspan / c.k), phase: c.ph }))]
-    return { eval: ev, expr, r2: r2Of(pts, ev) }
+    return { eval: ev, expr: [], r2: r2Of(pts, ev) }
   }
   return null
 }
@@ -126,13 +112,6 @@ function Formula({ expr }) {
         )
         if (e.t === 'exp') return (
           <span className="term" key={i}>{lead(i, e.a)}<b>{fmt(Math.abs(e.a))}</b>·<span className="fn">e</span><sup>{fmt(e.b)}·t</sup></span>
-        )
-        if (e.t === 'cos') return (
-          <span className="term" key={i}>
-            {lead(i, e.A)}<b>{fmt(Math.abs(e.A))}</b>·<span className="fn">cos</span>(
-            <span className="frac"><span>2π<i>t</i></span><span>{e.period}</span></span>
-            <span className="op">{e.phase < 0 ? '−' : '+'}</span>{Math.abs(e.phase).toFixed(2)})
-          </span>
         )
         return null
       })}
@@ -275,10 +254,14 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
           <div className="fi-head">
             <b>{FIT_TYPES.find(([k]) => k === fitType)?.[1]}</b>
             <span>區間 D{selCurve.d0}–D{selCurve.d1}（{selCurve.n} 點）· t = 天數 − {selCurve.d0}</span>
-            <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>
+            {fitType !== 'connect' && <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>}
             <button onClick={() => setSelCurve(null)} aria-label="關閉">×</button>
           </div>
-          <div className="formula-row"><Formula expr={selCurve.expr} /></div>
+          <div className="formula-row">
+            {fitType === 'connect'
+              ? <span className="formula">逐點直線連接實測值，不做回歸擬合</span>
+              : <Formula expr={selCurve.expr} />}
+          </div>
         </div>
       )}
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img"

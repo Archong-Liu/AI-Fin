@@ -260,7 +260,7 @@ export function buildFleetContext(ships, meta) {
   }
 }
 
-export async function consultAI({ view, question, history, shipContext, fleetContext, wantDetailed }) {
+export async function consultAI({ view, question, history, shipContext, fleetContext }) {
   if (!API_BASE) return null
   try {
     const ctl = new AbortController()
@@ -268,7 +268,7 @@ export async function consultAI({ view, question, history, shipContext, fleetCon
     const r = await fetch(`${API_BASE}/api/consult`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
       body: JSON.stringify({
-        view, question, history, want_detailed: !!wantDetailed,
+        view, question, history,
         ship_context: shipContext ?? undefined, fleet_context: fleetContext ?? undefined,
       }),
     })
@@ -293,6 +293,28 @@ export async function sendNotify({ shipId, currentPct, daysSinceHull, note, reci
       body: JSON.stringify({
         ship_id: shipId, current_pct: currentPct, days_since_hull: daysSinceHull,
         note: note ?? undefined, recipients: recipients ?? undefined,
+      }),
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+// 一封信件，排版對齊 DataView 畫面上的報告卡片（①摘要/②表格/③模型依據），
+// 而非每艘船各寄一封——見 lambdas/notify/handler.py compose_report()。
+export async function sendReportEmail({ title, summary, rows, basis, recipients }) {
+  if (!API_BASE) return null
+  try {
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 15000)
+    const r = await fetch(`${API_BASE}/api/notify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({
+        report: { title, summary, rows, basis },
+        recipients: recipients ?? undefined,
       }),
     })
     clearTimeout(t)

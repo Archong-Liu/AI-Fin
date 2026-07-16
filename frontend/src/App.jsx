@@ -2,11 +2,10 @@ import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
-import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify } from './api.js'
+import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify, sendReportEmail } from './api.js'
 import { blandAltmanAnalysis, calculateDynamicTolerance, batchStatistics } from './statistics.js'
 import { professionalScatterChart, professionalBlandAltmanChart } from './charts-simple.js'
 import { generateMockVerificationData, BATCH_CSV_EXAMPLE } from './demo-data.js'
-import { FleetIntelligenceEngine, NotificationDispatcher, runFleetIntelligenceAnalysis } from './llm-analysis.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -178,7 +177,7 @@ function AddShipModal({ ships, onAdd, onClose }) {
 }
 
 /* ---------- 單船分析 ---------- */
-function RecoCard({ ship, onConsult }) {
+function RecoCard({ ship }) {
   const thr = ship.thr
   const st = statusOf(ship.sl, thr)
   const dock = ship.recommendDrydock ?? (ship.cleanCount >= 3)
@@ -200,8 +199,7 @@ function RecoCard({ ship, onConsult }) {
         )}
         <tr><td><b>本次清潔預期維持</b></td><td><b>約 {lifeMonths.toFixed(0)} 個月</b></td></tr>
       </tbody></table>
-      {/* 開啟 AI 諮詢側欄，帶 want_detailed 請 Claude 產出跨部門排程建議（docs/feature-spec.md F4 v0.2） */}
-      {st !== 'good' && <button className="cta" onClick={() => onConsult(ship)}>{dock ? '排入進塢評估 →' : '排入清潔計畫 →'}</button>}
+      {st !== 'good' && <button className="cta">{dock ? '排入進塢評估 →' : '排入清潔計畫 →'}</button>}
     </div>
   )
 }
@@ -209,7 +207,7 @@ function RecoCard({ ship, onConsult }) {
 const SHIP_TABS = [['overview', '總覽'], ['foc', '油耗細節'], ['validate', '模型驗證']]
 const SL_RANGES = [['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
 
-function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
+function ShipView({ ships, ship, onPick, updateShip }) {
   const [tab, setTab] = useState('overview')
   const [win, setWin] = useState({ d0: 0, d1: DMAX })
   const thr = ship.thr
@@ -271,7 +269,7 @@ function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
           </div>
         </div>
         <div className="ship-bottom">
-          <RecoCard ship={ship} onConsult={onConsult} />
+          <RecoCard ship={ship} />
           <div className="card">
             <h3>損失歸因（模型估計）</h3>
             <div className="hint">船體汙損 vs 螺槳 vs 其他因素</div>
@@ -808,11 +806,8 @@ function DataView({ ships, meta }) {
   const mape = meta?.mape ?? 4.2
   const staticSummary = `本月全船隊平均 Speed Loss 為 ${avgSl.toFixed(1)}%。${overShips.length} 艘船舶超過各自警戒線，估計每日合計多燒 ${totPenalty.toFixed(1)} t 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 ${mape.toFixed(1)}%。`
 
-  // AI 摘要和智能分析狀態
   const [aiSummary, setAiSummary] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
-  const [intelligenceAnalysis, setIntelligenceAnalysis] = useState(null)
-  const [analysisLoading, setAnalysisLoading] = useState(false)
   const [notificationState, setNotificationState] = useState('idle')
 
   // ①摘要用真實 Bedrock 呼叫產生（docs/feature-spec.md F4 v0.2），失敗/未設 VITE_API_BASE
@@ -828,66 +823,33 @@ function DataView({ ships, meta }) {
     return () => { on = false }
   }, [ships, meta])
 
-  // 智能分析功能
-  const runIntelligentAnalysis = async () => {
-    setAnalysisLoading(true)
-    try {
-      const apiClient = { consultAI, sendNotify } // 使用現有 API 函數
-      const results = await runFleetIntelligenceAnalysis(ships, apiClient)
-      setIntelligenceAnalysis(results)
-    } catch (error) {
-      console.error('Intelligence analysis failed:', error)
-      setIntelligenceAnalysis({ error: error.message })
-    } finally {
-      setAnalysisLoading(false)
+  // 單一資料來源：畫面表格、Markdown 匯出、寄信內容都從這裡取值，不各自重算一份
+  const reportRows = ships.slice(0, 5).map(s => {
+    const st = statusOf(s.sl, s.thr)
+    return {
+      ship_id: s.name, sl_pct: s.sl.toFixed(1), penalty_t_day: s.penalty.toFixed(1),
+      action: st === 'crit' ? (s.cleanCount >= 3 ? '評估進塢' : '安排清潔') : st === 'watch' ? '觀察' : '—',
+      buffer: s.sl >= s.thr ? '已超標' : `${bufferDays(s, s.thr)} 天`,
     }
-  }
+  })
+  const reportBasis = '基準油耗模型以良好天氣航段（風力 ≤ 4 級、全速 ≥ 22 小時）訓練，比對養護事件前後之速度–油耗曲線位移，分離船體汙損與螺槳因素。'
 
-  // 發送智能建議通知
-  const sendIntelligentNotifications = async () => {
-    if (!intelligenceAnalysis?.notifications?.length) return
-    
-    setNotificationState('sending')
-    try {
-      const dispatcher = new NotificationDispatcher({ sendNotify })
-      const results = await dispatcher.dispatchNotifications(intelligenceAnalysis.notifications)
-      
-      const successCount = results.filter(r => r.success).length
-      if (successCount > 0) {
-        setNotificationState('sent')
-        // 更新分析結果
-        setIntelligenceAnalysis(prev => ({
-          ...prev,
-          notification_results: results
-        }))
-      } else {
-        setNotificationState('error')
-      }
-    } catch (error) {
-      console.error('Notification dispatch failed:', error)
-      setNotificationState('error')
-    }
-  }
-
+  // 一封信，排版對齊畫面上的報告卡片（①摘要/②表格/③模型依據）——不是每艘船各寄一封
   const sendToEngineering = async () => {
     setNotificationState('sending')
-    const targets = overShips.length ? overShips.slice(0, 5) : ships.slice(0, 1)
-    const results = await Promise.all(targets.map(s => sendNotify({
-      shipId: s.name, currentPct: +s.sl.toFixed(1), daysSinceHull: s.daysClean,
-      note: aiSummary ?? s.dockRationale ?? undefined,
-    })))
-    setNotificationState(results.some(r => r?.sent) ? 'sent' : 'error')
+    const res = await sendReportEmail({
+      title: '船隊船體能效月報', summary: aiSummary ?? staticSummary,
+      rows: reportRows, basis: reportBasis,
+    })
+    setNotificationState(res?.sent ? 'sent' : 'error')
   }
 
   const exportMarkdown = () => {
-    const rows = ships.slice(0, 5).map(s => {
-      const st = statusOf(s.sl, s.thr)
-      const act = st === 'crit' ? (s.cleanCount >= 3 ? '評估進塢' : '安排清潔') : st === 'watch' ? '觀察' : '—'
-      return `| ${s.name} | ${s.sl.toFixed(1)}% | ${s.penalty.toFixed(1)} t/d | ${act} | ${s.sl >= s.thr ? '已超標' : `${bufferDays(s, s.thr)} 天`} |`
-    }).join('\n')
+    const rows = reportRows.map(r =>
+      `| ${r.ship_id} | ${r.sl_pct}% | ${r.penalty_t_day} t/d | ${r.action} | ${r.buffer} |`).join('\n')
     const md = `# 船隊船體能效月報\n\n## 摘要\n\n${aiSummary ?? staticSummary}\n\n` +
       `## 優先處理建議\n\n| 船名 | Speed Loss | 額外油耗 | 建議 | 調度緩衝期 |\n|---|---|---|---|---|\n${rows}\n\n` +
-      `## 模型依據\n\n基準油耗模型以良好天氣航段（風力 ≤ 4 級、全速 ≥ 22 小時）訓練，比對養護事件前後之速度–油耗曲線位移，分離船體汙損與螺槳因素。\n`
+      `## 模型依據\n\n${reportBasis}\n`
     const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }))
     const a = document.createElement('a')
     a.href = url; a.download = 'fleet-report.md'; a.click()
@@ -922,245 +884,21 @@ function DataView({ ships, meta }) {
           <table>
             <thead><tr><th>船名</th><th>Speed Loss</th><th>額外油耗</th><th>建議</th><th>調度緩衝期</th></tr></thead>
             <tbody>
-              {ships.slice(0, 5).map(s => {
-                const st = statusOf(s.sl, s.thr)
-                const act = st === 'crit' ? (s.cleanCount >= 3 ? '評估進塢' : '安排清潔') : st === 'watch' ? '觀察' : '—'
-                return (
-                  <tr key={s.id}><td>{s.name}</td><td className="num">{s.sl.toFixed(1)}%</td>
-                    <td className="num">{s.penalty.toFixed(1)} t/d</td>
-                    <td>{act}</td><td className="num">{s.sl >= s.thr ? '已超標' : `${bufferDays(s, s.thr)} 天`}</td></tr>
-                )
-              })}
+              {reportRows.map(r => (
+                <tr key={r.ship_id}><td>{r.ship_id}</td><td className="num">{r.sl_pct}%</td>
+                  <td className="num">{r.penalty_t_day} t/d</td>
+                  <td>{r.action}</td><td className="num">{r.buffer}</td></tr>
+              ))}
             </tbody>
           </table>
           <h4>③ 模型依據</h4>
-          <p>基準油耗模型以良好天氣航段（風力 ≤ 4 級、全速 ≥ 22 小時）訓練，比對養護事件前後之速度–油耗曲線位移，分離船體汙損與螺槳因素。</p>
+          <p>{reportBasis}</p>
           <div className="export-row">
             <button className="primary" onClick={() => window.print()}>匯出 PDF</button>
             <button onClick={exportMarkdown}>匯出 Markdown</button>
             <button onClick={sendToEngineering} disabled={notificationState === 'sending' || notificationState === 'sent'}>
               {NOTIFY_LABEL[notificationState]}
             </button>
-          </div>
-        </div>
-
-        {/* 智能分析和建議系統 */}
-        <div className="card ai-intelligence-panel" style={{ marginTop: '20px' }}>
-          <h2>AI 智能分析與運營建議</h2>
-          <div className="hint">使用 LLM 深度分析船隊數據，自動生成運營建議並通知相關部門</div>
-          
-          <div className="intelligence-controls" style={{ display: 'flex', gap: '16px', marginTop: '16px' }}>
-            <button 
-              className="cta2" 
-              onClick={runIntelligentAnalysis}
-              disabled={analysisLoading}
-              style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-            >
-              {analysisLoading ? '分析中...' : '開始智能分析'}
-            </button>
-            
-            {intelligenceAnalysis?.notifications?.length > 0 && (
-              <button 
-                className="primary" 
-                onClick={sendIntelligentNotifications}
-                disabled={notificationState === 'sending'}
-                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                {notificationState === 'sending' ? '發送中...' : 
-                 notificationState === 'sent' ? '已發送' : 
-                 `發送建議 (${intelligenceAnalysis.notifications.length})`}
-              </button>
-            )}
-          </div>
-
-          {/* 分析結果展示 */}
-          {analysisLoading && (
-            <div className="analysis-loading" style={{ 
-              padding: '20px', 
-              textAlign: 'center', 
-              backgroundColor: '#f8f9fa',
-              borderRadius: '6px',
-              margin: '16px 0'
-            }}>
-              <div style={{ fontSize: '16px', marginBottom: '8px', fontWeight: '500' }}>AI 正在分析船隊數據</div>
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                分析 {ships.length} 艘船舶的性能數據、維修歷史和運營狀況
-              </div>
-            </div>
-          )}
-
-          {intelligenceAnalysis && !analysisLoading && (
-            <div className="intelligence-results" style={{ marginTop: '20px' }}>
-              {intelligenceAnalysis.error ? (
-                <div className="error-panel" style={{ 
-                  padding: '16px', 
-                  backgroundColor: '#fff3cd', 
-                  border: '1px solid #ffeaa7',
-                  borderRadius: '6px',
-                  color: '#856404'
-                }}>
-                  分析失敗: {intelligenceAnalysis.error}
-                </div>
-              ) : (
-                <>
-                  {/* 執行摘要 */}
-                  {intelligenceAnalysis.summary && (
-                    <div className="analysis-summary" style={{ 
-                      padding: '16px', 
-                      backgroundColor: '#e8f5e8', 
-                      borderRadius: '6px',
-                      marginBottom: '16px'
-                    }}>
-                      <h4 style={{ margin: '0 0 8px 0', color: '#2d5016' }}>分析摘要</h4>
-                      <div style={{ color: '#2d5016' }}>{intelligenceAnalysis.summary.summary}</div>
-                      <div style={{ fontSize: '12px', marginTop: '8px', color: '#5a7c42' }}>
-                        共分析 {intelligenceAnalysis.summary.total_analyses} 項，
-                        生成 {intelligenceAnalysis.summary.total_recommendations} 條建議，
-                        其中 {intelligenceAnalysis.summary.critical_issues} 條需要緊急處理
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 建議列表 */}
-                  {intelligenceAnalysis.analyses && intelligenceAnalysis.analyses.length > 0 && (
-                    <div className="recommendations-panel">
-                      <h4>智能建議</h4>
-                      {intelligenceAnalysis.analyses.map((analysis, index) => (
-                        <div key={index} className="analysis-item" style={{
-                          border: '1px solid #e9ecef',
-                          borderRadius: '6px',
-                          padding: '16px',
-                          marginBottom: '12px',
-                          backgroundColor: '#fefefe'
-                        }}>
-                          {analysis.ship_name && (
-                            <div style={{ 
-                              fontWeight: '600', 
-                              color: '#495057',
-                              marginBottom: '8px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '8px'
-                            }}>
-                              {analysis.ship_name}
-                              {analysis.urgency && (
-                                <span style={{
-                                  padding: '2px 8px',
-                                  borderRadius: '12px',
-                                  fontSize: '11px',
-                                  fontWeight: '500',
-                                  backgroundColor: analysis.urgency === 'critical' ? '#dc3545' : 
-                                                  analysis.urgency === 'high' ? '#fd7e14' :
-                                                  analysis.urgency === 'medium' ? '#ffc107' : '#28a745',
-                                  color: 'white'
-                                }}>
-                                  {analysis.urgency.toUpperCase()}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          
-                          {analysis.analysis_summary && (
-                            <div style={{ marginBottom: '12px', color: '#6c757d', fontSize: '14px' }}>
-                              {analysis.analysis_summary}
-                            </div>
-                          )}
-
-                          {analysis.recommendations && analysis.recommendations.map((rec, recIndex) => (
-                            <div key={recIndex} className="recommendation" style={{
-                              backgroundColor: '#f8f9fa',
-                              padding: '12px',
-                              borderRadius: '4px',
-                              marginBottom: '8px'
-                            }}>
-                              <div style={{ 
-                                fontWeight: '500', 
-                                color: '#495057',
-                                marginBottom: '4px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '8px'
-                              }}>
-                                {rec.action}
-                                <span style={{
-                                  padding: '1px 6px',
-                                  borderRadius: '8px',
-                                  fontSize: '10px',
-                                  backgroundColor: rec.priority === 'critical' ? '#dc3545' : 
-                                                  rec.priority === 'high' ? '#fd7e14' :
-                                                  rec.priority === 'medium' ? '#ffc107' : '#6c757d',
-                                  color: 'white'
-                                }}>
-                                  {rec.priority}
-                                </span>
-                              </div>
-                              
-                              {rec.rationale && (
-                                <div style={{ fontSize: '13px', color: '#6c757d', marginBottom: '6px' }}>
-                                  建議理由: {rec.rationale}
-                                </div>
-                              )}
-                              
-                              <div style={{ 
-                                display: 'grid', 
-                                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                                gap: '8px',
-                                fontSize: '12px',
-                                color: '#495057'
-                              }}>
-                                {rec.timeline && (
-                                  <div>時程: {rec.timeline}</div>
-                                )}
-                                {rec.expected_benefit && (
-                                  <div>預期效益: {rec.expected_benefit}</div>
-                                )}
-                                {rec.departments && (
-                                  <div>負責部門: {rec.departments.join(', ')}</div>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* 通知發送結果 */}
-                  {intelligenceAnalysis.notification_results && (
-                    <div className="notification-results" style={{
-                      padding: '16px',
-                      backgroundColor: '#d4edda',
-                      borderRadius: '6px',
-                      marginTop: '16px'
-                    }}>
-                      <h4 style={{ margin: '0 0 8px 0', color: '#155724' }}>通知發送結果</h4>
-                      {intelligenceAnalysis.notification_results.map((result, index) => (
-                        <div key={index} style={{ fontSize: '13px', color: '#155724' }}>
-                          {result.success ? '✓' : '✗'} 通知 {index + 1}: {result.success ? '發送成功' : result.error}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {/* API 配置說明 */}
-          <div className="api-config-info" style={{
-            marginTop: '20px',
-            padding: '16px',
-            backgroundColor: '#e3f2fd',
-            borderRadius: '6px',
-            border: '1px solid #2196f3'
-          }}>
-            <h4 style={{ margin: '0 0 8px 0', color: '#1565c0' }}>LLM 整合說明</h4>
-            <div style={{ fontSize: '13px', color: '#1565c0', lineHeight: '1.5' }}>
-              <div>• 此功能需要配置 AWS Bedrock、OpenAI 或其他 LLM 服務</div>
-              <div>• API 端點: <code>/api/consult</code> (智能分析) 和 <code>/api/notify</code> (通知發送)</div>
-              <div>• 支持自定義 prompt 模板和分析邏輯</div>
-              <div>• 可整合 SES、SNS 等 AWS 服務進行通知分發</div>
-            </div>
           </div>
         </div>
     </div>
@@ -1280,23 +1018,19 @@ export default function App() {
   // 呼叫 /api/consult（見 docs/feature-spec.md F4 v0.2）；VITE_API_BASE 未設定或呼叫失敗時
   // 退回本地示意回覆 aiAnswer()，行為與 api.js 的 fetchFleetData 多來源降級一致。
   const [busy, setBusy] = useState(false)
-  const ask = async (q, { wantDetailed = false } = {}) => {
+  const ask = async q => {
     setMsgs(m => [...m, { role: 'user', text: q }])
     const history = msgs.filter(m => m.role === 'user' || m.role === 'ai').slice(-6)
       .map(m => ({ role: m.role, text: m.text }))
     setBusy(true)
     const res = await consultAI({
-      view, question: q, history, wantDetailed,
+      view, question: q, history,
       shipContext: view === 'ship' ? buildShipContext(ship) : null,
       fleetContext: view === 'fleet' ? buildFleetContext(ships, meta) : null,
     })
     setBusy(false)
     if (res?.answer) setMsgs(m => [...m, { role: 'ai', text: res.answer, action: res.suggested_action }])
     else setTimeout(() => setMsgs(m => [...m, { role: 'ai', text: aiAnswer(q, ships, ship) }]), 300)
-  }
-  const consultDetailed = s => {
-    setDrawerOpen(true)
-    ask(`請幫我針對 ${s.name} 產生跨部門排程建議（含清潔成本與航線影響評估）`, { wantDetailed: true })
   }
   const pick = id => { setShipId(id); setView('ship') }
 
@@ -1342,7 +1076,7 @@ export default function App() {
         </header>
         <main className="content">
           {view === 'fleet' && <FleetView ships={ships} onPick={pick} onAdd={addShip} meta={meta} />}
-          {view === 'ship' && <ShipView ships={ships} ship={ship} onPick={setShipId} updateShip={updateShip} onConsult={consultDetailed} />}
+          {view === 'ship' && <ShipView ships={ships} ship={ship} onPick={setShipId} updateShip={updateShip} />}
           {view === 'verify' && (<>
             <h2 className="section">人工比對（導入期雙軌驗證）</h2>
             <DualVerify ships={ships} />
