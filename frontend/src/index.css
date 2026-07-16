@@ -342,14 +342,19 @@ button.ghost:hover{border-color:var(--accent);color:var(--accent)}
   .report-doc .export-row{display:none!important}
 }
 
-/* ===== AI 諮詢抽屜 ===== */
+/* ===== AI 諮詢面板 =====
+   在 .app 的 flex 版面裡佔一個真正的欄位（會擠壓 .main-col 讓它變窄），不是蓋在
+   畫面上的 fixed overlay。展開/收合靠外層 width 0↔380px + overflow:hidden 裁切，
+   內層 .drawer-inner 固定寬度，過場時內容本身不會被壓扁變形。 */
 .drawer{
-  position:fixed;top:0;right:0;height:100vh;width:380px;z-index:50;
+  flex:none;position:sticky;top:0;align-self:flex-start;height:100vh;width:380px;
+  overflow:hidden;z-index:20;
   background:var(--panel);border-left:1px solid var(--line-soft);
-  display:flex;flex-direction:column;box-shadow:-12px 0 40px rgba(20,39,58,.12);
-  transition:transform .2s ease;
+  box-shadow:-12px 0 40px rgba(20,39,58,.06);
+  transition:width .22s ease,border-left-color .22s ease;
 }
-.drawer.closed{transform:translateX(100%);visibility:hidden}
+.drawer.closed{width:0;border-left-color:transparent;box-shadow:none}
+.drawer-inner{width:380px;height:100%;display:flex;flex-direction:column}
 .drawer header{padding:16px 18px 12px;border-bottom:1px solid var(--line-soft)}
 .drawer .t{font-family:var(--font-display);font-weight:600;font-size:19.2px;display:flex;align-items:center;gap:9px}
 .drawer .x{margin-left:auto;border:0;background:transparent;color:var(--faint);font-size:24px;line-height:1;padding:0 4px}
@@ -362,6 +367,11 @@ button.ghost:hover{border-color:var(--accent);color:var(--accent)}
 .msg.sys{align-self:center;background:none;color:var(--faint);font-size:14.4px;font-family:var(--font-data);padding:2px 0}
 .msg.ai.pending{color:var(--faint);animation:pulse 1.4s infinite}
 .msg-action{margin-top:8px;padding-top:8px;border-top:1px solid var(--line-soft);font-size:15.6px;color:var(--muted)}
+.msg-detailed{margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft);font-size:15px;line-height:1.6}
+.msg-detailed .md-head{display:flex;align-items:center;gap:10px;margin-bottom:6px;font-size:16.2px}
+.msg-detailed .md-head b{color:var(--accent)}
+.msg-detailed .md-conf{font-family:var(--font-data);color:var(--faint);font-size:13.2px}
+.msg-detailed p{margin:6px 0}
 .sugs{padding:0 18px 12px;display:flex;flex-wrap:wrap;gap:7px}
 .sugs button{font-size:15.6px;border:1px solid var(--line);background:var(--panel-2);color:var(--muted);border-radius:20px;padding:5px 13px}
 .sugs button:hover{border-color:var(--accent);color:var(--accent)}

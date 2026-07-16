@@ -44,6 +44,9 @@ def bedrock():
 # check `aws bedrock list-inference-profiles` if invokes start failing with that error.
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 MAX_TOKENS = 900
+# want_detailed 除了一兩句話的回答，還要生出完整的 4 段跨部門建議 + JSON block；900 tokens
+# 實測會在 JSON 中途被截斷（結尾沒有收合的 ``` /}），detailed_recommendation 因此永遠解析失敗。
+MAX_TOKENS_DETAILED = 2000
 
 PERSONA = "你是陽明海運的船體能效顧問，熟悉 Speed Loss、船體/螺旋槳汙損與清潔排程。"
 
@@ -137,7 +140,7 @@ def _consult(view, question, history, ship_ctx, fleet_ctx, want_detailed):
     try:
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": MAX_TOKENS_DETAILED if want_detailed else MAX_TOKENS,
             "system": system,
             "messages": [{"role": "user", "content": user_msg}],
         })

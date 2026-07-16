@@ -260,15 +260,17 @@ export function buildFleetContext(ships, meta) {
   }
 }
 
-export async function consultAI({ view, question, history, shipContext, fleetContext }) {
+export async function consultAI({ view, question, history, shipContext, fleetContext, wantDetailed }) {
   if (!API_BASE) return null
   try {
     const ctl = new AbortController()
-    const t = setTimeout(() => ctl.abort(), 20000)
+    // API Gateway HTTP API 硬上限 30s（平台限制），32s 確保前端不會比 gateway 自己先放棄；
+    // want_detailed 回應 token 數大（MAX_TOKENS_DETAILED），耗時本來就比一般問答長。
+    const t = setTimeout(() => ctl.abort(), 32000)
     const r = await fetch(`${API_BASE}/api/consult`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctl.signal,
       body: JSON.stringify({
-        view, question, history,
+        view, question, history, want_detailed: !!wantDetailed,
         ship_context: shipContext ?? undefined, fleet_context: fleetContext ?? undefined,
       }),
     })

@@ -60,7 +60,10 @@ resource "aws_lambda_function" "llm" {
   handler          = "handler.lambda_handler"
   filename         = data.archive_file.llm.output_path
   source_code_hash = data.archive_file.llm.output_base64sha256
-  timeout          = 20
+  # HTTP API v2 hard-caps integration timeout at 30s (platform limit, not configurable) --
+  # 29s uses nearly all of that headroom. want_detailed responses run ~2000 tokens
+  # (see MAX_TOKENS_DETAILED in handler.py) and can take noticeably longer to generate.
+  timeout          = 29
   memory_size      = 256
 
   environment {
