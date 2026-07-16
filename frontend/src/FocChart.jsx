@@ -149,7 +149,8 @@ export function FocAttribution({ ship }) {
     chart.setOption({
       backgroundColor: 'transparent',
       grid: { left: 56, right: 24, top: 44, bottom: 28 },
-      legend: { top: 0, left: 48, itemWidth: 14, textStyle: { color: COLOR.text } },
+      // 圖例靠右上，避免和左上的 y 軸名稱「額外油耗（t/day）」重疊
+      legend: { top: 0, right: 24, itemWidth: 14, textStyle: { color: COLOR.text } },
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'shadow' },
