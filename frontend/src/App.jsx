@@ -60,7 +60,7 @@ function FleetView({ ships, onPick, onAdd, meta }) {
         <button className="add-ship" onClick={() => setAdding(true)}>＋ 新增船隻</button>
       </div>
       {adding && <AddShipModal ships={ships} onAdd={onAdd} onClose={() => setAdding(false)} />}
-      <h2 className="section">船隊健康指標</h2>
+      <h2 className="section">船隊資訊</h2>
       <div className="kpis">
         <div className="kpi"><div className="label">船隊平均 Speed Loss</div>
           <div className="value">{avgSl.toFixed(1)}<small> %</small></div>
