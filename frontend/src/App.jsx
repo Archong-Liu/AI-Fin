@@ -1,8 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlExplorer, { DMAX } from './SlExplorer.jsx'
 import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify } from './api.js'
+import { blandAltmanAnalysis, calculateDynamicTolerance, batchStatistics } from './statistics.js'
+import { professionalScatterChart, professionalBlandAltmanChart } from './charts-simple.js'
+import { generateMockVerificationData, BATCH_CSV_EXAMPLE } from './demo-data.js'
+import { FleetIntelligenceEngine, NotificationDispatcher, runFleetIntelligenceAnalysis } from './llm-analysis.js'
 
 const Svg = ({ html, className = 'chart-wrap' }) => (
   <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
@@ -306,6 +310,9 @@ function DualVerify({ ships }) {
   const [manual, setManual] = useState('')
   const [tol, setTol] = useState(2)
   const [log, setLog] = useState([])
+  const [activeTab, setActiveTab] = useState('single') // single | batch | analysis
+  const [batchData, setBatchData] = useState('')
+  const [useDynamicTol, setUseDynamicTol] = useState(false)
   const ship = ships.find(x => x.id === shipId) || ships[0]
 
   // 系統軌：即時計算，不用按按鈕
@@ -314,77 +321,425 @@ function DualVerify({ ships }) {
   const diff = foc != null ? ((foc - base) / base) * 100 : null
   const st = diff != null ? statusOf(diff, ship.thr) : null
 
+  // 動態容忍度計算
+  const dynamicTol = useMemo(() => {
+    if (!useDynamicTol) return tol
+    return calculateDynamicTolerance(ship, log)
+  }, [useDynamicTol, tol, ship, log])
+
+  const effectiveTol = useDynamicTol ? dynamicTol : tol
+
   // 人工軌：與系統值比對，差異在容忍範圍內＝一致
   const m = parseFloat(manual)
   const gapPct = foc != null && m > 0 ? ((m - foc) / foc) * 100 : null
-  const agree = gapPct != null ? Math.abs(gapPct) <= tol : null
-  const record = () => setLog(l => [{ id: l.length + 1, name: ship.name, foc, m, gapPct, agree }, ...l])
-  const okN = log.filter(r => r.agree).length
+  const agree = gapPct != null ? Math.abs(gapPct) <= effectiveTol : null
+  const record = () => setLog(l => [{ 
+    id: l.length + 1, 
+    name: ship.name, 
+    shipId: ship.id,
+    foc, 
+    m, 
+    gapPct, 
+    agree, 
+    tolerance: effectiveTol,
+    timestamp: new Date().toISOString()
+  }, ...l])
+  
+  // 基於當前容忍度重新計算一致性
+  const okN = log.filter(r => Math.abs(r.gapPct) <= effectiveTol).length
+
+  // 統計分析 - 基於當前容忍度重新計算
+  const statistics = useMemo(() => {
+    if (log.length < 3) return null
+    
+    // 重新計算每條記錄的一致性（基於當前容忍度）
+    const adjustedLog = log.map(record => ({
+      ...record,
+      agree: Math.abs(record.gapPct) <= effectiveTol,
+      tolerance: effectiveTol // 更新為當前容忍度
+    }))
+    
+    return batchStatistics(adjustedLog)
+  }, [log, effectiveTol])
+
+  // 演示數據生成
+  const generateDemoData = () => {
+    try {
+      const demoData = generateMockVerificationData(25)
+      setLog(demoData)
+      setActiveTab('analysis')
+    } catch (error) {
+      console.error('生成演示數據失敗:', error)
+      alert('生成演示數據失敗，請檢查控制台')
+    }
+  }
+
+  const loadBatchExample = () => {
+    setBatchData(BATCH_CSV_EXAMPLE)
+  }
+
+  // 批量處理函數
+  const processBatchData = () => {
+    try {
+      const lines = batchData.trim().split('\n')
+      const batchResults = []
+      
+      lines.forEach((line, index) => {
+        const parts = line.split(',').map(p => p.trim())
+        if (parts.length >= 4) {
+          const [shipName, consumption, hours, speed, manualValue] = parts
+          const batchFoc = (parseFloat(consumption) / parseFloat(hours)) * 24
+          const batchBase = 50 + (parseFloat(speed) - 14) * 3.2
+          const batchDiff = ((batchFoc - batchBase) / batchBase) * 100
+          const batchGap = ((parseFloat(manualValue) - batchFoc) / batchFoc) * 100
+          const batchAgree = Math.abs(batchGap) <= effectiveTol
+          
+          batchResults.push({
+            id: log.length + batchResults.length + 1,
+            name: shipName,
+            shipId: shipId, // 使用當前選中的船
+            foc: batchFoc,
+            m: parseFloat(manualValue),
+            gapPct: batchGap,
+            agree: batchAgree,
+            tolerance: effectiveTol,
+            timestamp: new Date().toISOString(),
+            batch: true
+          })
+        }
+      })
+      
+      setLog(prev => [...batchResults, ...prev])
+      setBatchData('')
+      alert(`成功處理 ${batchResults.length} 筆批量數據`)
+    } catch (error) {
+      alert('批量數據格式錯誤，請檢查 CSV 格式')
+    }
+  }
 
   return (
     <>
-      <div className="pipeline">
-        <div className="step"><div className="no">STEP 1</div><div className="nm">丟一筆測試數據</div><div className="ds">船 + 當日油耗／時數／航速</div></div>
-        <div className="step"><div className="no">STEP 2</div><div className="nm">系統自動計算</div><div className="ds">Daily FOC vs 模型基準</div></div>
-        <div className="step"><div className="no">STEP 3</div><div className="nm">填入人工手算值</div><div className="ds">差異在容忍內＝一致</div></div>
-        <div className="step"><div className="no">STEP 4</div><div className="nm">累積一致率</div><div className="ds">達標後評估退出雙軌</div></div>
+      {/* 標籤頁導航 */}
+      <div className="verify-tabs">
+        <button 
+          className={`tab-btn ${activeTab === 'single' ? 'active' : ''}`}
+          onClick={() => setActiveTab('single')}
+        >
+          單筆驗證
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'batch' ? 'active' : ''}`}
+          onClick={() => setActiveTab('batch')}
+        >
+          批量驗證
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'analysis' ? 'active' : ''}`}
+          onClick={() => setActiveTab('analysis')}
+        >
+          統計分析 {log.length > 0 && `(${log.length})`}
+        </button>
+        <button 
+          className="tab-btn demo"
+          onClick={generateDemoData}
+        >
+          生成演示數據
+        </button>
       </div>
-      <div className="verify-grid mt">
-        <div className="card">
-          <h3>① 測試數據</h3>
-          <div className="hint">輸入輪機部門回報的一筆當日原始數據（人工手算須使用同一筆）</div>
-          <div className="mvrow">
-            <label>船隻
-              <select value={shipId} onChange={e => setShipId(+e.target.value)}>
-                {ships.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </label>
-            <label>當日主機全速油耗 (MT)<input type="number" value={c} step="0.1" onChange={e => setC(+e.target.value)} /></label>
-            <label>全速時數 (hr)<input type="number" value={h} step="0.5" onChange={e => setH(+e.target.value)} /></label>
-            <label>對水航速 STW (kn)<input type="number" value={sw} step="0.1" onChange={e => setSw(+e.target.value)} /></label>
-          </div>
-          <div className="ctrl-meta">狀態判定採用此船警戒線 {ship.thr}%</div>
-        </div>
-        <div className="card">
-          <h3>② 系統計算 × ③ 人工比對</h3>
-          <table className="kv"><tbody>
-            <tr><td>系統 Daily FOC</td><td>{foc != null ? `${foc.toFixed(1)} t/day` : '—'}</td></tr>
-            <tr><td>模型乾淨基準</td><td>{base.toFixed(1)} t/day</td></tr>
-            <tr><td>偏差（≒ speed loss）</td>
-              <td style={{ color: st ? `var(--${st})` : undefined }}>
-                {diff != null ? `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%（${STATUS_TXT[st]}）` : '—'}
-              </td></tr>
-          </tbody></table>
-          <div className="mvrow" style={{ marginTop: 14 }}>
-            <label>人工手算 Daily FOC (t/day)<input type="number" value={manual} step="0.1" placeholder="輪機部門算的值" onChange={e => setManual(e.target.value)} /></label>
-            <label>容忍差異 ± (%)<input type="number" value={tol} min="0.5" step="0.5" onChange={e => setTol(+e.target.value || 2)} /></label>
-          </div>
-          {agree != null && (
-            <div className={`verdict ${agree ? 'ok' : 'bad'}`} role="status">
-              {agree
-                ? `✓ 一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，在 ±${tol}% 容忍範圍內`
-                : `✗ 不一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，超出 ±${tol}%，建議回報模型團隊複查`}
+
+
+
+      {/* 單筆驗證頁面 */}
+      {activeTab === 'single' && (
+        <>
+          <div className="verify-grid mt">
+            <div className="card">
+              <h3>① 測試數據</h3>
+              <div className="hint">輸入輪機部門回報的一筆當日原始數據（人工手算須使用同一筆）</div>
+              <div className="mvrow">
+                <label>船隻
+                  <select value={shipId} onChange={e => setShipId(+e.target.value)}>
+                    {ships.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </label>
+                <label>當日主機全速油耗 (MT)<input type="number" value={c} step="0.1" onChange={e => setC(+e.target.value)} /></label>
+                <label>全速時數 (hr)<input type="number" value={h} step="0.5" onChange={e => setH(+e.target.value)} /></label>
+                <label>對水航速 STW (kn)<input type="number" value={sw} step="0.1" onChange={e => setSw(+e.target.value)} /></label>
+              </div>
+              <div className="ctrl-meta">狀態判定採用此船警戒線 {ship.thr}%</div>
             </div>
-          )}
-          <button className="cta2" disabled={agree == null} onClick={record}>記錄本次比對 →</button>
+            <div className="card">
+              <h3>② 系統計算 × ③ 人工比對</h3>
+              <table className="kv"><tbody>
+                <tr><td>系統 Daily FOC</td><td>{foc != null ? `${foc.toFixed(1)} t/day` : '—'}</td></tr>
+                <tr><td>模型乾淨基準</td><td>{base.toFixed(1)} t/day</td></tr>
+                <tr><td>偏差（≒ speed loss）</td>
+                  <td style={{ color: st ? `var(--${st})` : undefined }}>
+                    {diff != null ? `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%（${STATUS_TXT[st]}）` : '—'}
+                  </td></tr>
+              </tbody></table>
+              <div className="mvrow" style={{ marginTop: 14 }}>
+                <label>人工手算 Daily FOC (t/day)<input type="number" value={manual} step="0.1" placeholder="輪機部門算的值" onChange={e => setManual(e.target.value)} /></label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input 
+                      type="checkbox" 
+                      checked={useDynamicTol} 
+                      onChange={e => setUseDynamicTol(e.target.checked)}
+                    />
+                    動態容忍度
+                  </label>
+                  {!useDynamicTol && (
+                    <label>容忍差異 ± (%)<input type="number" value={tol} min="0.5" step="0.5" onChange={e => setTol(+e.target.value || 2)} /></label>
+                  )}
+                  {useDynamicTol && (
+                    <div className="hint" style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                      當前動態容忍度: ±{effectiveTol.toFixed(1)}% (基於船型: {ship.type || 'general'})
+                    </div>
+                  )}
+                </div>
+              </div>
+              {agree != null && (
+                <div className={`verdict ${agree ? 'ok' : 'bad'}`} role="status">
+                  {agree
+                    ? `✓ 一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，在 ±${effectiveTol.toFixed(1)}% 容忍範圍內`
+                    : `✗ 不一致 — 差異 ${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(1)}%，超出 ±${effectiveTol.toFixed(1)}%，建議回報模型團隊複查`}
+                </div>
+              )}
+              <button className="cta2" disabled={agree == null} onClick={record}>記錄本次比對 →</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* 批量驗證頁面 */}
+      {activeTab === 'batch' && (
+        <div className="card mt">
+          <h3>批量數據驗證</h3>
+          <div className="hint">
+            上傳 CSV 格式數據進行批量驗證。格式：船名,油耗(MT),時數(hr),航速(kn),人工FOC值<br/>
+            範例：EVER_GIVEN,58,22,15.2,63.2
+          </div>
+          
+          {/* 容忍度設定區域 */}
+          <div className="batch-tolerance-control" style={{ 
+            background: '#f8f9fa', 
+            padding: '16px', 
+            borderRadius: '6px', 
+            margin: '16px 0',
+            border: '1px solid #e9ecef'
+          }}>
+            <h4 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#495057' }}>驗證設定</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '14px', fontWeight: '500', minWidth: '80px' }}>容忍度閾值</span>
+                <input 
+                  type="number" 
+                  value={tol} 
+                  onChange={e => setTol(parseFloat(e.target.value) || 0)}
+                  step="0.1" 
+                  min="0" 
+                  max="10"
+                  style={{ 
+                    width: '80px', 
+                    padding: '4px 8px', 
+                    border: '1px solid #ced4da',
+                    borderRadius: '4px',
+                    fontSize: '14px'
+                  }}
+                  disabled={useDynamicTol}
+                />
+                <span style={{ fontSize: '14px', color: '#6c757d' }}>%</span>
+              </label>
+              
+              <label style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '8px',
+                padding: '8px 12px',
+                background: useDynamicTol ? '#e3f2fd' : 'transparent',
+                borderRadius: '4px',
+                border: useDynamicTol ? '1px solid #2196f3' : '1px solid transparent'
+              }}>
+                <input 
+                  type="checkbox" 
+                  checked={useDynamicTol}
+                  onChange={e => setUseDynamicTol(e.target.checked)}
+                  style={{ margin: '0' }}
+                />
+                <span style={{ fontSize: '14px', fontWeight: '500' }}>使用動態容忍度</span>
+              </label>
+              
+              <div style={{ 
+                padding: '8px 12px',
+                background: '#e8f5e8',
+                borderRadius: '4px',
+                border: '1px solid #28a745'
+              }}>
+                <span style={{ fontSize: '13px', fontWeight: '600', color: '#155724' }}>
+                  當前閾值: ±{effectiveTol.toFixed(1)}%
+                </span>
+              </div>
+            </div>
+            
+            <div className="hint" style={{ marginTop: '8px', fontSize: '12px', color: '#6c757d' }}>
+              {useDynamicTol ? 
+                '動態容忍度會根據歷史數據自動調整，提高驗證準確性' : 
+                '固定容忍度適用於標準化驗證流程'
+              }
+            </div>
+          </div>
+
+          <textarea
+            value={batchData}
+            onChange={e => setBatchData(e.target.value)}
+            placeholder="船名1,58,22,15.2,63.2&#10;船名2,62,20,14.8,68.1&#10;..."
+            rows={8}
+            style={{ 
+              width: '100%', 
+              padding: '10px', 
+              border: '1px solid var(--line)', 
+              borderRadius: '4px',
+              fontFamily: 'monospace'
+            }}
+          />
+          <div className="mvrow" style={{ marginTop: '16px', justifyContent: 'space-between' }}>
+            <button 
+              className="ghost" 
+              onClick={loadBatchExample}
+              style={{ padding: '8px 16px', fontSize: '14px' }}
+            >
+              載入範例數據
+            </button>
+            <button 
+              className="cta2" 
+              onClick={processBatchData}
+              disabled={!batchData.trim()}
+            >
+              處理批量數據
+            </button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* 統計分析頁面 */}
+      {activeTab === 'analysis' && (
+        <div className="mt">
+          {log.length < 3 ? (
+            <div className="card">
+              <h3>統計分析</h3>
+              <div className="hint">需要至少 3 筆驗證記錄才能進行統計分析</div>
+            </div>
+          ) : (
+            <>
+              {/* 統計摘要卡片 */}
+              <div className="card">
+                <h3>統計摘要</h3>
+                <div className="stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginTop: '16px' }}>
+                  <div className="stat-item">
+                    <div className="stat-label">總驗證次數</div>
+                    <div className="stat-value">{statistics?.totalRecords || 0}</div>
+                  </div>
+                  <div className="stat-item">
+                    <div className="stat-label">一致率</div>
+                    <div className="stat-value" style={{ color: (statistics?.agreementRate || 0) >= 0.95 ? 'var(--good)' : (statistics?.agreementRate || 0) >= 0.8 ? 'var(--watch)' : 'var(--crit)' }}>
+                      {((statistics?.agreementRate || 0) * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                  <div className="stat-item">
+                    <div className="stat-label">平均差異</div>
+                    <div className="stat-value">{(statistics?.meanGap || 0) >= 0 ? '+' : ''}{(statistics?.meanGap || 0).toFixed(2)}%</div>
+                  </div>
+                  <div className="stat-item">
+                    <div className="stat-label">差異標準差</div>
+                    <div className="stat-value">±{(statistics?.stdGap || 0).toFixed(2)}%</div>
+                  </div>
+                  <div className="stat-item">
+                    <div className="stat-label">相關係數</div>
+                    <div className="stat-value">{statistics?.correlation?.toFixed(3) || 'N/A'}</div>
+                  </div>
+                  <div className="stat-item">
+                    <div className="stat-label">R²</div>
+                    <div className="stat-value">{statistics?.regression?.rSquared?.toFixed(3) || 'N/A'}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 圖表區域 */}
+              <div className="analysis-charts" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '20px' }}>
+                <div className="card">
+                  <div dangerouslySetInnerHTML={{ 
+                    __html: professionalScatterChart(
+                      log.map(r => r.foc), 
+                      log.map(r => r.m),
+                      log.map(r => ({ name: r.name, timestamp: r.timestamp })),
+                      { title: "系統值 vs 人工值散點圖" }
+                    )
+                  }} />
+                </div>
+                <div className="card">
+                  <div dangerouslySetInnerHTML={{ 
+                    __html: professionalBlandAltmanChart(
+                      statistics?.blandAltman, 
+                      log.map(r => ({ name: r.name, timestamp: r.timestamp })),
+                      { title: "Bland-Altman 一致性分析" }
+                    )
+                  }} />
+                </div>
+              </div>
+
+              {/* 異常值檢測 */}
+              {statistics?.outliers && statistics.outliers.length > 0 && (
+                <div className="card mt">
+                  <h3>異常值檢測</h3>
+                  <div className="hint">以下記錄被識別為統計異常值（基於 IQR 方法）：</div>
+                  <table className="vlog" style={{ marginTop: '16px' }}>
+                    <thead><tr><th>記錄#</th><th>船名</th><th>系統FOC</th><th>人工FOC</th><th>差異</th><th>異常類型</th></tr></thead>
+                    <tbody>
+                      {statistics.outliers.map(r => (
+                        <tr key={r.id} style={{ backgroundColor: 'var(--danger-bg)' }}>
+                          <td>{r.id}</td><td>{r.name}</td>
+                          <td>{r.foc.toFixed(1)}</td><td>{r.m.toFixed(1)}</td>
+                          <td>{r.gapPct >= 0 ? '+' : ''}{r.gapPct.toFixed(1)}%</td>
+                          <td>{r.outlierReason === 'high' ? '高異常' : '低異常'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 驗證記錄（所有標籤頁共用） */}
       <div className="card mt">
         <h3>④ 驗證紀錄（雙軌期間累積）</h3>
         {log.length === 0 ? (
           <div className="hint">尚無紀錄——每次比對後按「記錄」即累積於此，作為結束雙軌的依據。</div>
         ) : (
           <>
-            <div className="vstat">一致 {okN} / {log.length} 筆（{(okN / log.length * 100).toFixed(0)}%）· 建議：連續 30 筆一致率 ≥95% 即可評估結束雙軌（demo 門檻）</div>
+            <div className="vstat">
+              一致 {okN} / {log.length} 筆（{(okN / log.length * 100).toFixed(0)}%）· 
+              建議：連續 30 筆一致率 ≥95% 即可評估結束雙軌（demo 門檻）
+              {useDynamicTol && <span style={{ marginLeft: '10px', color: 'var(--accent)' }}>[AUTO] 動態容忍度已啟用</span>}
+            </div>
             <table className="vlog">
-              <thead><tr><th>#</th><th>船</th><th>系統 FOC</th><th>人工 FOC</th><th>差異</th><th>結果</th></tr></thead>
+              <thead><tr><th>#</th><th>船</th><th>系統 FOC</th><th>人工 FOC</th><th>差異</th><th>容忍度</th><th>結果</th><th>類型</th></tr></thead>
               <tbody>
-                {log.map(r => (
-                  <tr key={r.id}><td>{r.id}</td><td>{r.name}</td>
-                    <td>{r.foc.toFixed(1)}</td><td>{r.m.toFixed(1)}</td>
-                    <td>{r.gapPct >= 0 ? '+' : ''}{r.gapPct.toFixed(1)}%</td>
-                    <td className={r.agree ? 'ok' : 'bad'}>{r.agree ? '✓ 一致' : '✗ 不一致'}</td></tr>
-                ))}
+                {log.map(r => {
+                  const currentAgree = Math.abs(r.gapPct) <= effectiveTol
+                  return (
+                    <tr key={r.id}><td>{r.id}</td><td>{r.name}</td>
+                      <td>{r.foc.toFixed(1)}</td><td>{r.m.toFixed(1)}</td>
+                      <td>{r.gapPct >= 0 ? '+' : ''}{r.gapPct.toFixed(1)}%</td>
+                      <td>±{effectiveTol.toFixed(1)}%</td>
+                      <td className={currentAgree ? 'ok' : 'bad'}>{currentAgree ? '✓ 一致' : '✗ 不一致'}</td>
+                      <td>{r.batch ? '批量' : '單筆'}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </>
@@ -453,10 +808,15 @@ function DataView({ ships, meta }) {
   const mape = meta?.mape ?? 4.2
   const staticSummary = `本月全船隊平均 Speed Loss 為 ${avgSl.toFixed(1)}%。${overShips.length} 艘船舶超過各自警戒線，估計每日合計多燒 ${totPenalty.toFixed(1)} t 燃油（VLSFO 當量）。模型 Daily FOC 預測誤差（MAPE）為 ${mape.toFixed(1)}%。`
 
-  // ①摘要用真實 Bedrock 呼叫產生（docs/feature-spec.md F4 v0.2），失敗/未設 VITE_API_BASE
-  // 就停在 staticSummary（同一組真實數字，只是沒有 AI 潤飾）——與其餘 AI 功能同一套降級邏輯。
+  // AI 摘要和智能分析狀態
   const [aiSummary, setAiSummary] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
+  const [intelligenceAnalysis, setIntelligenceAnalysis] = useState(null)
+  const [analysisLoading, setAnalysisLoading] = useState(false)
+  const [notificationState, setNotificationState] = useState('idle')
+
+  // ①摘要用真實 Bedrock 呼叫產生（docs/feature-spec.md F4 v0.2），失敗/未設 VITE_API_BASE
+  // 就停在 staticSummary（同一組真實數字，只是沒有 AI 潤飾）——與其餘 AI 功能同一套降級邏輯。
   useEffect(() => {
     let on = true
     setAiBusy(true)
@@ -468,15 +828,55 @@ function DataView({ ships, meta }) {
     return () => { on = false }
   }, [ships, meta])
 
-  const [notifyState, setNotifyState] = useState('idle')
+  // 智能分析功能
+  const runIntelligentAnalysis = async () => {
+    setAnalysisLoading(true)
+    try {
+      const apiClient = { consultAI, sendNotify } // 使用現有 API 函數
+      const results = await runFleetIntelligenceAnalysis(ships, apiClient)
+      setIntelligenceAnalysis(results)
+    } catch (error) {
+      console.error('Intelligence analysis failed:', error)
+      setIntelligenceAnalysis({ error: error.message })
+    } finally {
+      setAnalysisLoading(false)
+    }
+  }
+
+  // 發送智能建議通知
+  const sendIntelligentNotifications = async () => {
+    if (!intelligenceAnalysis?.notifications?.length) return
+    
+    setNotificationState('sending')
+    try {
+      const dispatcher = new NotificationDispatcher({ sendNotify })
+      const results = await dispatcher.dispatchNotifications(intelligenceAnalysis.notifications)
+      
+      const successCount = results.filter(r => r.success).length
+      if (successCount > 0) {
+        setNotificationState('sent')
+        // 更新分析結果
+        setIntelligenceAnalysis(prev => ({
+          ...prev,
+          notification_results: results
+        }))
+      } else {
+        setNotificationState('error')
+      }
+    } catch (error) {
+      console.error('Notification dispatch failed:', error)
+      setNotificationState('error')
+    }
+  }
+
   const sendToEngineering = async () => {
-    setNotifyState('sending')
+    setNotificationState('sending')
     const targets = overShips.length ? overShips.slice(0, 5) : ships.slice(0, 1)
     const results = await Promise.all(targets.map(s => sendNotify({
       shipId: s.name, currentPct: +s.sl.toFixed(1), daysSinceHull: s.daysClean,
       note: aiSummary ?? s.dockRationale ?? undefined,
     })))
-    setNotifyState(results.some(r => r?.sent) ? 'sent' : 'error')
+    setNotificationState(results.some(r => r?.sent) ? 'sent' : 'error')
   }
 
   const exportMarkdown = () => {
@@ -538,9 +938,229 @@ function DataView({ ships, meta }) {
           <div className="export-row">
             <button className="primary" onClick={() => window.print()}>匯出 PDF</button>
             <button onClick={exportMarkdown}>匯出 Markdown</button>
-            <button onClick={sendToEngineering} disabled={notifyState === 'sending' || notifyState === 'sent'}>
-              {NOTIFY_LABEL[notifyState]}
+            <button onClick={sendToEngineering} disabled={notificationState === 'sending' || notificationState === 'sent'}>
+              {NOTIFY_LABEL[notificationState]}
             </button>
+          </div>
+        </div>
+
+        {/* 智能分析和建議系統 */}
+        <div className="card ai-intelligence-panel" style={{ marginTop: '20px' }}>
+          <h2>AI 智能分析與運營建議</h2>
+          <div className="hint">使用 LLM 深度分析船隊數據，自動生成運營建議並通知相關部門</div>
+          
+          <div className="intelligence-controls" style={{ display: 'flex', gap: '16px', marginTop: '16px' }}>
+            <button 
+              className="cta2" 
+              onClick={runIntelligentAnalysis}
+              disabled={analysisLoading}
+              style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+            >
+              {analysisLoading ? '分析中...' : '開始智能分析'}
+            </button>
+            
+            {intelligenceAnalysis?.notifications?.length > 0 && (
+              <button 
+                className="primary" 
+                onClick={sendIntelligentNotifications}
+                disabled={notificationState === 'sending'}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                {notificationState === 'sending' ? '發送中...' : 
+                 notificationState === 'sent' ? '已發送' : 
+                 `發送建議 (${intelligenceAnalysis.notifications.length})`}
+              </button>
+            )}
+          </div>
+
+          {/* 分析結果展示 */}
+          {analysisLoading && (
+            <div className="analysis-loading" style={{ 
+              padding: '20px', 
+              textAlign: 'center', 
+              backgroundColor: '#f8f9fa',
+              borderRadius: '6px',
+              margin: '16px 0'
+            }}>
+              <div style={{ fontSize: '16px', marginBottom: '8px', fontWeight: '500' }}>AI 正在分析船隊數據</div>
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                分析 {ships.length} 艘船舶的性能數據、維修歷史和運營狀況
+              </div>
+            </div>
+          )}
+
+          {intelligenceAnalysis && !analysisLoading && (
+            <div className="intelligence-results" style={{ marginTop: '20px' }}>
+              {intelligenceAnalysis.error ? (
+                <div className="error-panel" style={{ 
+                  padding: '16px', 
+                  backgroundColor: '#fff3cd', 
+                  border: '1px solid #ffeaa7',
+                  borderRadius: '6px',
+                  color: '#856404'
+                }}>
+                  分析失敗: {intelligenceAnalysis.error}
+                </div>
+              ) : (
+                <>
+                  {/* 執行摘要 */}
+                  {intelligenceAnalysis.summary && (
+                    <div className="analysis-summary" style={{ 
+                      padding: '16px', 
+                      backgroundColor: '#e8f5e8', 
+                      borderRadius: '6px',
+                      marginBottom: '16px'
+                    }}>
+                      <h4 style={{ margin: '0 0 8px 0', color: '#2d5016' }}>分析摘要</h4>
+                      <div style={{ color: '#2d5016' }}>{intelligenceAnalysis.summary.summary}</div>
+                      <div style={{ fontSize: '12px', marginTop: '8px', color: '#5a7c42' }}>
+                        共分析 {intelligenceAnalysis.summary.total_analyses} 項，
+                        生成 {intelligenceAnalysis.summary.total_recommendations} 條建議，
+                        其中 {intelligenceAnalysis.summary.critical_issues} 條需要緊急處理
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 建議列表 */}
+                  {intelligenceAnalysis.analyses && intelligenceAnalysis.analyses.length > 0 && (
+                    <div className="recommendations-panel">
+                      <h4>智能建議</h4>
+                      {intelligenceAnalysis.analyses.map((analysis, index) => (
+                        <div key={index} className="analysis-item" style={{
+                          border: '1px solid #e9ecef',
+                          borderRadius: '6px',
+                          padding: '16px',
+                          marginBottom: '12px',
+                          backgroundColor: '#fefefe'
+                        }}>
+                          {analysis.ship_name && (
+                            <div style={{ 
+                              fontWeight: '600', 
+                              color: '#495057',
+                              marginBottom: '8px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px'
+                            }}>
+                              {analysis.ship_name}
+                              {analysis.urgency && (
+                                <span style={{
+                                  padding: '2px 8px',
+                                  borderRadius: '12px',
+                                  fontSize: '11px',
+                                  fontWeight: '500',
+                                  backgroundColor: analysis.urgency === 'critical' ? '#dc3545' : 
+                                                  analysis.urgency === 'high' ? '#fd7e14' :
+                                                  analysis.urgency === 'medium' ? '#ffc107' : '#28a745',
+                                  color: 'white'
+                                }}>
+                                  {analysis.urgency.toUpperCase()}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          
+                          {analysis.analysis_summary && (
+                            <div style={{ marginBottom: '12px', color: '#6c757d', fontSize: '14px' }}>
+                              {analysis.analysis_summary}
+                            </div>
+                          )}
+
+                          {analysis.recommendations && analysis.recommendations.map((rec, recIndex) => (
+                            <div key={recIndex} className="recommendation" style={{
+                              backgroundColor: '#f8f9fa',
+                              padding: '12px',
+                              borderRadius: '4px',
+                              marginBottom: '8px'
+                            }}>
+                              <div style={{ 
+                                fontWeight: '500', 
+                                color: '#495057',
+                                marginBottom: '4px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}>
+                                {rec.action}
+                                <span style={{
+                                  padding: '1px 6px',
+                                  borderRadius: '8px',
+                                  fontSize: '10px',
+                                  backgroundColor: rec.priority === 'critical' ? '#dc3545' : 
+                                                  rec.priority === 'high' ? '#fd7e14' :
+                                                  rec.priority === 'medium' ? '#ffc107' : '#6c757d',
+                                  color: 'white'
+                                }}>
+                                  {rec.priority}
+                                </span>
+                              </div>
+                              
+                              {rec.rationale && (
+                                <div style={{ fontSize: '13px', color: '#6c757d', marginBottom: '6px' }}>
+                                  建議理由: {rec.rationale}
+                                </div>
+                              )}
+                              
+                              <div style={{ 
+                                display: 'grid', 
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                                gap: '8px',
+                                fontSize: '12px',
+                                color: '#495057'
+                              }}>
+                                {rec.timeline && (
+                                  <div>時程: {rec.timeline}</div>
+                                )}
+                                {rec.expected_benefit && (
+                                  <div>預期效益: {rec.expected_benefit}</div>
+                                )}
+                                {rec.departments && (
+                                  <div>負責部門: {rec.departments.join(', ')}</div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* 通知發送結果 */}
+                  {intelligenceAnalysis.notification_results && (
+                    <div className="notification-results" style={{
+                      padding: '16px',
+                      backgroundColor: '#d4edda',
+                      borderRadius: '6px',
+                      marginTop: '16px'
+                    }}>
+                      <h4 style={{ margin: '0 0 8px 0', color: '#155724' }}>通知發送結果</h4>
+                      {intelligenceAnalysis.notification_results.map((result, index) => (
+                        <div key={index} style={{ fontSize: '13px', color: '#155724' }}>
+                          {result.success ? '✓' : '✗'} 通知 {index + 1}: {result.success ? '發送成功' : result.error}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* API 配置說明 */}
+          <div className="api-config-info" style={{
+            marginTop: '20px',
+            padding: '16px',
+            backgroundColor: '#e3f2fd',
+            borderRadius: '6px',
+            border: '1px solid #2196f3'
+          }}>
+            <h4 style={{ margin: '0 0 8px 0', color: '#1565c0' }}>LLM 整合說明</h4>
+            <div style={{ fontSize: '13px', color: '#1565c0', lineHeight: '1.5' }}>
+              <div>• 此功能需要配置 AWS Bedrock、OpenAI 或其他 LLM 服務</div>
+              <div>• API 端點: <code>/api/consult</code> (智能分析) 和 <code>/api/notify</code> (通知發送)</div>
+              <div>• 支持自定義 prompt 模板和分析邏輯</div>
+              <div>• 可整合 SES、SNS 等 AWS 服務進行通知分發</div>
+            </div>
           </div>
         </div>
     </div>
