@@ -2,5 +2,5 @@ import react from '@vitejs/plugin-react'
 
 export default {
   plugins: [react()],
-  server: { port: 5173 },
+  server: { port: Number(process.env.PORT) || 5173 },
 }

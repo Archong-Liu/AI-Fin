@@ -43,40 +43,16 @@ export const dateOf = d => {
   return `${t.getFullYear()}/${String(t.getMonth() + 1).padStart(2, '0')}/${String(t.getDate()).padStart(2, '0')}`
 }
 
-export function focChart(ship) {
+// 每日油耗資料（近 30 個良好天氣航行日，尾端對齊 D1825＝今日）。
+// 繪製在 FocChart.jsx；接真實資料時只換這個函式的內容。
+export function focSeries(ship) {
   setSeed(2000 + ship.id)
-  const days = 30, W = 980, H = 280, L = 68, B = 58, T = 16, R = 16
-  const base = [], act = []
-  for (let d = 0; d < days; d++) { const b = 52 + rnd() * 6; base.push(b); act.push(b * (1 + ship.sl / 100) + (rnd() - 0.5) * 2) }
-  const max = Math.max(...act) * 1.08, min = Math.min(...base) * 0.92
-  const px = i => L + (i / (days - 1)) * (W - L - R)
-  const py = v => T + (1 - (v - min) / (max - min)) * (H - T - B)
-  const bw = ((W - L - R) / days) * 0.62
-  let bars = ''
-  for (let d = 0; d < days; d++) {
-    const over = act[d] > base[d] * 1.04
-    bars += `<rect x="${px(d) - bw / 2}" y="${py(act[d])}" width="${bw}" height="${H - B - py(act[d])}" rx="1.5"
-      fill="${over ? 'var(--crit)' : 'var(--accent)'}" opacity="${over ? '.75' : '.55'}"/>`
+  const days = 30, rows = []
+  for (let i = 0; i < days; i++) {
+    const base = 52 + rnd() * 6
+    rows.push({ d: 1825 - (days - 1) + i, base, act: base * (1 + ship.sl / 100) + (rnd() - 0.5) * 2 })
   }
-  const line = base.map((v, i) => `${i ? 'L' : 'M'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join('')
-  let labels = `<text transform="rotate(-90 12 ${(T + H - B) / 2})" x="12" y="${(T + H - B) / 2}" text-anchor="middle"
-    style="fill:var(--muted);font-weight:600">Daily FOC（t/day）</text>`
-  for (let g = 0; g <= 3; g++) {
-    const val = min + ((max - min) / 3) * g, y = py(val)
-    labels += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
-      <text x="28" y="${y + 4}" style="fill:var(--text);font-weight:600">${val.toFixed(0)}</text>`
-  }
-  // 橫軸：日期 + D 天（近 30 個航行日，尾端對齊 D1825＝今日）
-  ;[0, 7, 14, 21, 29].forEach(i => {
-    const day = 1825 - (days - 1) + i
-    const anchor = i === 29 ? 'end' : 'middle' // 最右刻度靠右對齊，避免日期被裁切
-    labels += `<line x1="${px(i)}" y1="${H - B}" x2="${px(i)}" y2="${H - B + 5}" stroke="var(--chart-grid)"/>
-      <text x="${px(i)}" y="${H - B + 19}" text-anchor="${anchor}">${dateOf(day)}</text>
-      <text x="${px(i)}" y="${H - B + 34}" text-anchor="${anchor}" style="fill:var(--faint)">D${day}</text>`
-  })
-  labels += `<text x="${L + (W - L - R) / 2}" y="${H - 6}" text-anchor="middle"
-    style="fill:var(--muted);font-weight:600">日期（D = 資料起算第幾天）· 近 30 個良好天氣航行日</text>`
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗對比">${bars}<path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"/>${labels}</svg>`
+  return rows
 }
 
 // primary_cause（ml/speed_loss.py attribution()）→ 中文標籤
@@ -172,27 +148,35 @@ export function stackedFoc(ship) {
 
 export function scatterChart() {
   setSeed(77)
-  const W = 300, H = 220, L = 36, B = 28, T = 8, R = 8, min = 42, max = 68
+  const W = 560, H = 430, L = 66, B = 66, T = 40, R = 18, min = 42, max = 68
   const px = v => L + ((v - min) / (max - min)) * (W - L - R)
   const py = v => T + (1 - (v - min) / (max - min)) * (H - T - B)
-  let svg = `<line x1="${px(min)}" y1="${py(min)}" x2="${px(max)}" y2="${py(max)}" stroke="var(--faint)" stroke-dasharray="4 3"/>`
+  let svg = ''
+  ;[45, 50, 55, 60, 65].forEach(v => { // 格線 + 兩軸刻度
+    svg += `<line x1="${px(v)}" y1="${T}" x2="${px(v)}" y2="${H - B}" stroke="var(--chart-grid)"/>
+      <line x1="${L}" y1="${py(v)}" x2="${W - R}" y2="${py(v)}" stroke="var(--chart-grid)"/>
+      <text x="${px(v)}" y="${H - B + 24}" text-anchor="middle" style="font-size:14px;fill:var(--muted)">${v}</text>
+      <text x="${L - 10}" y="${py(v) + 5}" text-anchor="end" style="font-size:14px;fill:var(--muted)">${v}</text>`
+  })
+  svg += `<line x1="${px(min)}" y1="${py(min)}" x2="${px(max)}" y2="${py(max)}" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="6 4"/>`
   for (let i = 0; i < 70; i++) {
     const a = 44 + rnd() * 22, p = Math.min(max, Math.max(min, a * (1 + (rnd() - 0.5) * 0.085)))
-    svg += `<circle cx="${px(a).toFixed(1)}" cy="${py(p).toFixed(1)}" r="2.4" fill="var(--accent)" opacity=".6"/>`
+    svg += `<circle cx="${px(a).toFixed(1)}" cy="${py(p).toFixed(1)}" r="4" fill="var(--accent)" opacity=".55"/>`
   }
-  ;[45, 55, 65].forEach(v => { svg += `<text x="${px(v)}" y="${H - B + 13}" text-anchor="middle">${v}</text><text x="${L - 5}" y="${py(v) + 3}" text-anchor="end">${v}</text>` })
-  svg += `<text x="${(L + W - R) / 2}" y="${H - 3}" text-anchor="middle">實測 FOC (t/day) · 虛線＝完美預測</text>`
+  svg += `<line x1="${L}" y1="19" x2="${L + 34}" y2="19" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="${L + 42}" y="24" style="font-family:var(--font-body);font-size:14.5px;fill:var(--muted)">虛線＝完美預測（預測值 ＝ 實測值）</text>
+    <text x="${L + (W - L - R) / 2}" y="${H - 14}" text-anchor="middle" style="font-family:var(--font-body);font-size:15.5px;font-weight:600;fill:var(--text)">實測 FOC（t/day）</text>
+    <text x="22" y="${T + (H - T - B) / 2}" text-anchor="middle" transform="rotate(-90 22 ${T + (H - T - B) / 2})" style="font-family:var(--font-body);font-size:15.5px;font-weight:600;fill:var(--text)">預測 FOC（t/day）</text>`
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="預測與實測散點圖">${svg}</svg>`
 }
 
 export function mapeBars(ships) {
   setSeed(88)
   const rows = ships.slice(0, 6).map(s => ({ n: s.name, m: 3 + rnd() * 2.6 }))
-  return `<div style="font-size:13.8px;color:var(--muted);margin-bottom:6px">各船 Daily FOC 預測 MAPE（全船隊 4.2%）</div>` +
-    rows.map(r => `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
-      <span style="font-family:var(--font-data);font-size:12.6px;width:60px;flex:none">${r.n}</span>
-      <div style="flex:1;height:7px;background:var(--panel-2);border-radius:4px;overflow:hidden">
+  return rows.map(r => `<div style="display:flex;align-items:center;gap:14px;margin:15px 0">
+      <span style="font-family:var(--font-data);font-size:15.5px;color:var(--text);width:64px;flex:none">${r.n}</span>
+      <div style="flex:1;height:12px;background:var(--panel-2);border-radius:6px;overflow:hidden">
         <div style="width:${((r.m / 6) * 100).toFixed(0)}%;height:100%;background:${r.m > 5 ? 'var(--watch)' : 'var(--accent)'}"></div></div>
-      <span style="font-family:var(--font-data);font-size:13.2px;width:38px;text-align:right">${r.m.toFixed(1)}%</span></div>`).join('')
+      <span style="font-family:var(--font-data);font-size:16px;font-weight:600;color:var(--text);width:56px;text-align:right">${r.m.toFixed(1)}%</span></div>`).join('')
 }
 

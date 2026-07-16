@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
-import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
+import { spark, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
 import SlChart, { DMAX } from './SlChart.jsx'
+import FocChart from './FocChart.jsx'
 import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify, sendReportEmail } from './api.js'
 import { blandAltmanAnalysis, calculateDynamicTolerance, batchStatistics } from './statistics.js'
 import { professionalScatterChart, professionalBlandAltmanChart } from './charts-simple.js'
@@ -280,8 +281,8 @@ function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
       {tab === 'foc' && <>
         <div className="card">
           <h3>每日油耗 Daily FOC — 實測 vs 模型基準（乾淨船體）</h3>
-          <div className="hint">柱狀＝實測 FOC（t/day）；藍線＝模型預測之乾淨船體基準；兩者差距即汙損造成的額外油耗</div>
-          <Svg html={focChart(ship)} />
+          <div className="hint">三線＝實測 FOC／乾淨船體基準／額外油耗（實測−基準，t/day）；hover 看單日明細，可滾輪縮放或拖曳下方時間軸；圖下方可切換只顯示單一曲線</div>
+          <FocChart ship={ship} />
         </div>
         <div className="card mt">
           <h3>每日油耗歸因 — 成分堆疊（{ship.name} · 近 14 個航行日）</h3>
@@ -290,11 +291,17 @@ function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
         </div>
       </>}
       {tab === 'validate' && (
-        <div className="card" style={{ maxWidth: 560 }}>
-          <h3>模型驗證</h3>
-          <div className="hint">holdout 期間預測 vs 實測 Daily FOC</div>
-          <Svg className="" html={scatterChart()} />
-          <Svg className="" html={mapeBars(ships)} />
+        <div className="ship-bottom">
+          <div className="card">
+            <h3>模型驗證 — 預測 vs 實測</h3>
+            <div className="hint">保留驗證期（holdout）的每日油耗：一點＝一船一日，點越貼近虛線，預測越準</div>
+            <Svg html={scatterChart()} />
+          </div>
+          <div className="card">
+            <h3>各船預測誤差 MAPE</h3>
+            <div className="hint">每日油耗（Daily FOC）預測的平均誤差百分比，越低越準；全船隊平均 4.2%</div>
+            <Svg html={mapeBars(ships)} />
+          </div>
         </div>
       )}
     </>
@@ -860,20 +867,6 @@ function DataView({ ships, meta }) {
 
   return (
     <div>
-        <h2 className="section">每日正午報表 · 自動接收</h2>
-        <div className="card">
-          <div className="ingest-status"><span className="dot-live" />已啟用 — 每日 08:00 自動從船報系統拉取當日 CSV（或單船單行 data）</div>
-          <div className="hint">最近同步：D1825 · 15/15 艘回報 · 累計 21,283 筆，篩選後 18,240 筆</div>
-          <button className="ghost">手動補上傳 CSV（備援）</button>
-        </div>
-        <h2 className="section">處理管線</h2>
-        <div className="pipeline">
-          <div className="step"><div className="no">STEP 1</div><div className="nm">解析與欄位對映</div><div className="ds">csv → schema</div></div>
-          <div className="step"><div className="no">STEP 2</div><div className="nm">良好天氣篩選</div><div className="ds">WIND_SCALE ≤ 4 Bft<br />HOURS_FULL_SPEED ≥ 22 h</div></div>
-          <div className="step"><div className="no">STEP 3</div><div className="nm">燃料熱值換算</div><div className="ds">LCV → VLSFO 當量<br />MGO 42.7 / ULSFO 41.2<br />HFO 40.2 / VLSFO 40.2</div></div>
-          <div className="step"><div className="no">STEP 4</div><div className="nm">Daily FOC 計算</div><div className="ds">CONSUMP ÷ HOURS × 24</div></div>
-          <div className="step"><div className="no">STEP 5</div><div className="nm">模型推論</div><div className="ds">speed loss % + 汙損歸因</div></div>
-        </div>
         <h2 className="section">AI 報告</h2>
         <div className="card report-doc">
           <h1>船隊船體能效月報 — D1825</h1>
@@ -1036,7 +1029,12 @@ export default function App() {
   const first = useRef(true)
   useEffect(() => {
     if (first.current) { first.current = false; return }
-    setMsgs(m => [...m, { role: 'sys', text: `— 視圖已切換：${ctx}，AI 已同步脈絡 —` }])
+    // 連續切視圖只保留最後一條分隔線（前一則還是分隔線就原地取代），避免洗版；
+    // 目前脈絡另有 header 的「正在追蹤」常駐顯示
+    setMsgs(m => {
+      const divider = { role: 'sys', ctx: true, text: `— 已切換至：${ctx} —` }
+      return m[m.length - 1]?.ctx ? [...m.slice(0, -1), divider] : [...m, divider]
+    })
   }, [ctx])
 
   // 呼叫 /api/consult（見 docs/feature-spec.md F4 v0.2）；VITE_API_BASE 未設定或呼叫失敗時

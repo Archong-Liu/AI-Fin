@@ -138,10 +138,12 @@ export default function SlChart({ ship, thr, win, setWin }) {
     return () => chart.off('datazoom', onZoom)
   }, [setWin])
 
+  // 容器寬度變化（開關 AI 諮詢 drawer、視窗縮放）都要重算 canvas 尺寸，
+  // 只聽 window resize 會漏掉 drawer 擠壓 .main-col 的情況 → 圖表卡在舊寬度
   useEffect(() => {
-    const onResize = () => chartRef.current?.resize()
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
+    const ro = new ResizeObserver(() => chartRef.current?.resize())
+    ro.observe(elRef.current)
+    return () => ro.disconnect()
   }, [])
 
   return <div ref={elRef} style={{ width: '100%', height: 430 }} role="img" aria-label="speed loss 時間序列" />
