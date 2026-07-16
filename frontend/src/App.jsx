@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
 import { spark, focChart, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
-import SlExplorer, { DMAX } from './SlExplorer.jsx'
+import SlChart, { DMAX } from './SlChart.jsx'
 import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify, sendReportEmail } from './api.js'
 import { blandAltmanAnalysis, calculateDynamicTolerance, batchStatistics } from './statistics.js'
 import { professionalScatterChart, professionalBlandAltmanChart } from './charts-simple.js'
@@ -198,11 +198,13 @@ function RecoCard({ ship }) {
 }
 
 const SHIP_TABS = [['overview', '總覽'], ['foc', '油耗細節'], ['validate', '模型驗證']]
-const SL_RANGES = [['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
+// 近 2 週預設會太稀疏——只有良好天氣穩態日才算一個資料點，2 週內常只有 1~5 筆（見對話討論），
+// 看起來像散點不像趨勢；近 3 個月在實測資料中通常有 20~40 筆，預設改用這個。
+const SL_RANGES = [['2w', '近 2 週', DMAX - 14], ['3m', '近 3 個月', DMAX - 90], ['1y', '近 1 年', DMAX - 365], ['3y', '近 3 年', DMAX - 1095], ['all', '全部 5 年', 0]]
 
 function ShipView({ ships, ship, onPick, updateShip }) {
   const [tab, setTab] = useState('overview')
-  const [win, setWin] = useState({ d0: 0, d1: DMAX })
+  const [win, setWin] = useState({ d0: DMAX - 90, d1: DMAX })
   const thr = ship.thr
   const st = statusOf(ship.sl, thr)
   return (
@@ -243,12 +245,12 @@ function ShipView({ ships, ship, onPick, updateShip }) {
             <div className="ctrl-box plain">
               <div className="ctrl-title">圖例說明</div>
               <div className="legend v">
-                <span><span className="sw dot" />每日實測點</span>
-                <span><span className="sw" style={{ background: 'var(--accent)' }} />區間趨勢</span>
+                <span><span className="sw" style={{ background: 'var(--good)' }} />&lt; {(thr / 2).toFixed(1)}%（良好）</span>
+                <span><span className="sw" style={{ background: 'var(--watch)' }} />{(thr / 2).toFixed(1)}–{thr}%（觀察）</span>
+                <span><span className="sw" style={{ background: 'var(--crit)' }} />&gt; {thr}%（建議清潔）</span>
                 <span><span className="sw" style={{ background: 'var(--faint)' }} />養護事件</span>
-                <span><span className="sw" style={{ background: 'var(--crit)' }} />警戒線</span>
               </div>
-              <div className="ctrl-meta">每點＝一個良好天氣航行日（風 ≤4 級、全速 ≥22h）；右緣色帶＝狀態區間（紅／黃／綠）</div>
+              <div className="ctrl-meta">線段依警戒線自動分色；每點＝一個良好天氣航行日（風 ≤4 級、全速 ≥22h）；可滾輪縮放或拖曳下方時間軸</div>
             </div>
           </aside>
           <div className="card hero">
@@ -258,7 +260,7 @@ function ShipView({ ships, ship, onPick, updateShip }) {
                 {ship.sl >= thr ? `已超過警戒線 ${thr}%` : `警戒線 ${thr}% · 緩衝約 ${bufferDays(ship, thr)} 天`}
               </span>
             </div>
-            <SlExplorer ship={ship} thr={thr} win={win} setWin={setWin} />
+            <SlChart ship={ship} thr={thr} win={win} setWin={setWin} />
           </div>
         </div>
         <div className="ship-bottom">

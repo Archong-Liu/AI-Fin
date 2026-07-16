@@ -1,5 +1,7 @@
-// 互動式 Speed Loss 主圖：拖曳平移、滾輪/按鈕縮放、底部時間軸捲動條、
-// 點資料點看單日資訊；趨勢函數可選（線性/多項式/指數/逐點連線），點曲線看公式與 R²。
+// 互動式 Speed Loss 主圖：拖曳平移、滾輪/按鈕縮放、底部時間軸捲動條、點資料點看單日資訊；
+// 趨勢線一律逐點直線連接實測值（依養護事件分段，不跨事件邊界），不做回歸/週期性擬合——
+// 汙損累積是單向趨勢，強行擬合一條公式（線性/多項式/指數/傅立葉皆試過）反而會生出資料裡
+// 沒有的形狀，不如直接連線誠實、好懂。
 // 資料一律走 useShipSeries（api.js 銜接層產出），mock 船才用 charts.js 產生器。
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { dailySeries, dateOf } from './charts.js'
@@ -16,107 +18,18 @@ function useShipSeries(ship) {
   return series
 }
 
-/* ===== 擬合核心：廣義最小二乘（basis 線性組合 + 高斯消去） ===== */
-function lstsq(pts, basis) {
-  const m = basis.length
-  const A = Array.from({ length: m }, () => new Array(m + 1).fill(0))
-  for (const p of pts) {
-    const phi = basis.map(f => f(p.t))
-    for (let i = 0; i < m; i++) {
-      A[i][m] += phi[i] * p.v
-      for (let k = 0; k < m; k++) A[i][k] += phi[i] * phi[k]
-    }
+// pts:[{t,v}]（t=距區間起點天數，已依 t 排序）→ eval(t) 逐段線性內插；區間外 clamp 到端點值
+function connectPoints(pts) {
+  if (pts.length < 2) return null
+  const ev = t => {
+    if (t <= pts[0].t) return pts[0].v
+    if (t >= pts[pts.length - 1].t) return pts[pts.length - 1].v
+    let i = 0
+    while (i < pts.length - 2 && pts[i + 1].t < t) i++
+    const a = pts[i], b = pts[i + 1]
+    return b.t > a.t ? a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t) : a.v
   }
-  for (let c = 0; c < m; c++) { // 部分選主元
-    let piv = c
-    for (let r2 = c + 1; r2 < m; r2++) if (Math.abs(A[r2][c]) > Math.abs(A[piv][c])) piv = r2
-    if (Math.abs(A[piv][c]) < 1e-12) return null
-    ;[A[c], A[piv]] = [A[piv], A[c]]
-    for (let r2 = 0; r2 < m; r2++) {
-      if (r2 === c) continue
-      const f = A[r2][c] / A[c][c]
-      for (let k = c; k <= m; k++) A[r2][k] -= f * A[c][k]
-    }
-  }
-  return A.map((row, i) => row[m] / row[i])
-}
-
-const r2Of = (pts, ev) => {
-  const mean = pts.reduce((a, p) => a + p.v, 0) / pts.length
-  let sr = 0, st = 0
-  pts.forEach(p => { sr += (p.v - ev(p.t)) ** 2; st += (p.v - mean) ** 2 })
-  return st > 1e-9 ? Math.max(0, 1 - sr / st) : 1
-}
-const fmt = x => Math.abs(x) >= 1e4 || (x !== 0 && Math.abs(x) < 1e-3) ? x.toExponential(2) : +x.toPrecision(3)
-
-export const FIT_TYPES = [
-  ['linear', '線性 Linear'],
-  ['poly2', '二次多項式 Poly-2'],
-  ['poly3', '三次多項式 Poly-3'],
-  ['exp', '指數 Exponential'],
-  ['connect', '逐點連線 Point-to-Point'],
-]
-
-// pts:[{t,v}]（t=距區間起點天數）→ { eval, formula, r2 }；擬合失敗回 null
-function fitInterval(pts, type, Tspan) {
-  const u = t => t / Tspan // 多項式用正規化時間避免數值病態
-  if (type === 'linear' || type === 'poly2' || type === 'poly3') {
-    const deg = type === 'linear' ? 1 : type === 'poly2' ? 2 : 3
-    if (pts.length < deg + 2) return null
-    const basis = Array.from({ length: deg + 1 }, (_, k) => t => u(t) ** k)
-    const c = lstsq(pts, basis)
-    if (!c) return null
-    const ev = t => c.reduce((a, ck, k) => a + ck * u(t) ** k, 0)
-    const a = c.map((ck, k) => ck / Tspan ** k) // 換回 t 係數供顯示
-    const expr = a.map((ak, k) => k === 0 ? { t: 'num', v: ak } : { t: 'pow', coef: ak, pow: k })
-    return { eval: ev, expr, r2: r2Of(pts, ev) }
-  }
-  if (type === 'exp') {
-    const pos = pts.filter(p => p.v > 0.05)
-    if (pos.length < 4) return null
-    const c = lstsq(pos.map(p => ({ t: p.t, v: Math.log(p.v) })), [() => 1, t => t])
-    if (!c) return null
-    const ev = t => Math.exp(c[0] + c[1] * t)
-    return { eval: ev, expr: [{ t: 'exp', a: Math.exp(c[0]), b: c[1] }], r2: r2Of(pts, ev) }
-  }
-  if (type === 'connect') {
-    // 逐點直線連接：不做回歸/週期性假設，永遠貼合實測值本身——汙損累積是單向趨勢，
-    // 傅立葉的週期諧波重建反而會生出資料裡沒有的擺動，不如直接連線誠實。
-    if (pts.length < 2) return null
-    const sorted = [...pts].sort((a, b) => a.t - b.t)
-    const ev = t => {
-      if (t <= sorted[0].t) return sorted[0].v
-      if (t >= sorted[sorted.length - 1].t) return sorted[sorted.length - 1].v
-      let i = 0
-      while (i < sorted.length - 2 && sorted[i + 1].t < t) i++
-      const a = sorted[i], b = sorted[i + 1]
-      return b.t > a.t ? a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t) : a.v
-    }
-    return { eval: ev, expr: [], r2: r2Of(pts, ev) }
-  }
-  return null
-}
-
-/* ===== 公式排版：結構化項次 → 數學式（分數疊排/上標/係數上色，不用外部庫） ===== */
-function Formula({ expr }) {
-  const lead = (i, v) => i === 0
-    ? (v < 0 ? <span className="op">−</span> : null)
-    : <span className="op">{v < 0 ? '−' : '+'}</span>
-  return (
-    <span className="formula">
-      <i>SL(t)</i><span className="op">=</span>
-      {expr.map((e, i) => {
-        if (e.t === 'num') return <span className="term" key={i}>{lead(i, e.v)}<b>{fmt(Math.abs(e.v))}</b></span>
-        if (e.t === 'pow') return (
-          <span className="term" key={i}>{lead(i, e.coef)}<b>{fmt(Math.abs(e.coef))}</b>·<i>t</i>{e.pow > 1 && <sup>{e.pow}</sup>}</span>
-        )
-        if (e.t === 'exp') return (
-          <span className="term" key={i}>{lead(i, e.a)}<b>{fmt(Math.abs(e.a))}</b>·<span className="fn">e</span><sup>{fmt(e.b)}·t</sup></span>
-        )
-        return null
-      })}
-    </span>
-  )
+  return { eval: ev }
 }
 
 export default function SlExplorer({ ship, thr, win, setWin }) {
@@ -127,25 +40,22 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
   const tdrag = useRef(null)
   const [dragging, setDragging] = useState(false)
   const [sel, setSel] = useState(null)        // 被點選的資料點
-  const [fitType, setFitType] = useState('linear')
-  const [selCurve, setSelCurve] = useState(null) // 被點選的趨勢曲線
   const { events, pts } = useShipSeries(ship)
-  useEffect(() => { setSel(null); setSelCurve(null) }, [ship, fitType])
+  useEffect(() => { setSel(null) }, [ship])
 
-  // 每個養護區間各自擬合使用者選的函數
+  // 每個養護區間各自逐點連線，不跨事件邊界（清潔前後不會互相污染顯示）
   const curves = useMemo(() => {
     const bounds = [0, ...events.map(e => e.d), DMAX + 1]
     const out = []
     for (let bi = 0; bi < bounds.length - 1; bi++) {
       const seg = pts.filter(p => p.d >= bounds[bi] && p.d < bounds[bi + 1])
-      if (seg.length < 4) continue
+      if (seg.length < 2) continue
       const d0 = seg[0].d, d1 = seg[seg.length - 1].d
-      const f = fitInterval(seg.map(p => ({ t: p.d - d0, v: p.v })), fitType, Math.max(1, d1 - d0))
-        ?? fitInterval(seg.map(p => ({ t: p.d - d0, v: p.v })), 'linear', Math.max(1, d1 - d0))
+      const f = connectPoints(seg.map(p => ({ t: p.d - d0, v: p.v })))
       if (f) out.push({ ...f, d0, d1, n: seg.length })
     }
     return out
-  }, [pts, events, fitType])
+  }, [pts, events])
 
   const span = win.d1 - win.d0
   const clampWin = (d0, d1) => {
@@ -238,36 +148,16 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
   return (
     <div className="sl-explorer">
       <div className="explorer-bar">
-        <label className="fit-pick">趨勢函數
-          <select value={fitType} onChange={e => setFitType(e.target.value)}>
-            {FIT_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-          </select>
-        </label>
         <span className="btns">
           <button onClick={() => zoomAt(1 / 1.4)} aria-label="放大">＋</button>
           <button onClick={() => zoomAt(1.4)} aria-label="縮小">−</button>
           <button className="txt" onClick={() => setWin({ d0: 0, d1: DMAX })}>重置</button>
         </span>
       </div>
-      {selCurve && (
-        <div className="fit-info" role="status">
-          <div className="fi-head">
-            <b>{FIT_TYPES.find(([k]) => k === fitType)?.[1]}</b>
-            <span>區間 D{selCurve.d0}–D{selCurve.d1}（{selCurve.n} 點）· t = 天數 − {selCurve.d0}</span>
-            {fitType !== 'connect' && <span className="fi-r2">R² = {selCurve.r2.toFixed(3)}</span>}
-            <button onClick={() => setSelCurve(null)} aria-label="關閉">×</button>
-          </div>
-          <div className="formula-row">
-            {fitType === 'connect'
-              ? <span className="formula">逐點直線連接實測值，不做回歸擬合</span>
-              : <Formula expr={selCurve.expr} />}
-          </div>
-        </div>
-      )}
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
-        aria-label="speed loss 時間序列（可拖曳平移、縮放；點資料點或趨勢線看詳情）"
+        aria-label="speed loss 時間序列（可拖曳平移、縮放；點資料點看詳情）"
         className={dragging ? 'dragging' : ''}
-        onClick={() => { if (!movedRef.current) { setSel(null); setSelCurve(null) } }}
+        onClick={() => { if (!movedRef.current) setSel(null) }}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
         <text transform={`rotate(-90 20 ${(T + H - B) / 2})`} x="20" y={(T + H - B) / 2}
           textAnchor="middle" style={{ fill: 'var(--muted)', fontWeight: 600 }}>Speed Loss（%）</text>
@@ -314,17 +204,7 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
         {vpts.map(p => <circle key={p.d} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="2" fill="var(--text)" opacity=".8" />)}
         {curves.map((c, i) => {
           const d = curvePath(c)
-          if (!d) return null
-          const active = selCurve && selCurve.d0 === c.d0
-          return (
-            <g key={i}>
-              <path d={d} fill="none" stroke="var(--accent)" strokeWidth={active ? 3.6 : 2.4} />
-              <path d={d} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke"
-                style={{ cursor: 'pointer' }}
-                onPointerDown={e => e.stopPropagation()}
-                onClick={e => { e.stopPropagation(); setSelCurve(c); setSel(null) }} />
-            </g>
-          )
+          return d && <path key={i} d={d} fill="none" stroke="var(--accent)" strokeWidth="2.4" />
         })}
         {lastCurve && lastCurve.d1 >= win.d0 && lastCurve.d1 <= win.d1 && (() => {
           const vEnd = Math.max(0, lastCurve.eval(lastCurve.d1 - lastCurve.d0))
@@ -339,15 +219,13 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
         {vpts.map(p => (
           <circle key={`h${p.d}`} cx={px(p.d)} cy={Math.max(T, py(p.v))} r="8" fill="transparent" style={{ cursor: 'pointer' }}
             onPointerDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); setSel(p); setSelCurve(null) }} />
+            onClick={e => { e.stopPropagation(); setSel(p) }} />
         ))}
         {sel && sel.d >= win.d0 && sel.d <= win.d1 && (() => {
           const x = px(sel.d), y = Math.max(T, py(sel.v))
-          const BW = 232, BH = 132
+          const BW = 232, BH = 114
           const bx = x + 14 + BW > W - R ? x - 14 - BW : x + 14
           const by = Math.min(Math.max(T, y - BH / 2), H - B - BH)
-          const c = curves.find(cv => sel.d >= cv.d0 && sel.d <= cv.d1)
-          const tv = c ? Math.max(0, c.eval(sel.d - c.d0)) : null
           const stp = statusOf(sel.v, thr)
           const gap = sel.v - thr
           return (
@@ -356,10 +234,9 @@ export default function SlExplorer({ ship, thr, win, setWin }) {
               <rect x={bx} y={by} width={BW} height={BH} fill="var(--panel)" stroke="var(--line)" />
               <text x={bx + 12} y={by + 22} style={{ fill: 'var(--text)', fontWeight: 600 }}>{dateOf(sel.d)}（D{sel.d}）</text>
               <text x={bx + 12} y={by + 44}>實測 Speed Loss：{sel.v.toFixed(2)}%</text>
-              <text x={bx + 12} y={by + 62}>趨勢值：{tv != null ? `${tv.toFixed(2)}%` : '—'}</text>
-              <text x={bx + 12} y={by + 80}>對警戒線 {thr}%：{gap >= 0 ? '+' : ''}{gap.toFixed(2)} pt</text>
-              <text x={bx + 12} y={by + 98}>估計額外油耗：{(sel.v * CONFIG.penaltyPerSl).toFixed(1)} t/day</text>
-              <text x={bx + 12} y={by + 118} style={{ fill: `var(--${stp})`, fontWeight: 600 }}>狀態：{STATUS_TXT[stp]}</text>
+              <text x={bx + 12} y={by + 62}>對警戒線 {thr}%：{gap >= 0 ? '+' : ''}{gap.toFixed(2)} pt</text>
+              <text x={bx + 12} y={by + 80}>估計額外油耗：{(sel.v * CONFIG.penaltyPerSl).toFixed(1)} t/day</text>
+              <text x={bx + 12} y={by + 98} style={{ fill: `var(--${stp})`, fontWeight: 600 }}>狀態：{STATUS_TXT[stp]}</text>
             </g>
           )
         })()}
