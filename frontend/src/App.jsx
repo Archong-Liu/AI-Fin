@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { makeShips, makeShip, DEFAULT_THR, statusOf, STATUS_TXT, bufferDays, aiAnswer, SUGGESTIONS } from './data.js'
-import { spark, attrDonut, stackedFoc, scatterChart, mapeBars } from './charts.js'
+import { spark, attrDonut, scatterChart, mapeBars } from './charts.js'
 import SlChart, { DMAX } from './SlChart.jsx'
-import FocChart from './FocChart.jsx'
+import FocChart, { FocAttribution } from './FocChart.jsx'
 import { fetchFleetData, fetchSpeedLoss, adaptFleet, adaptSpeedLoss, consultAI, buildShipContext, buildFleetContext, sendNotify, sendReportEmail } from './api.js'
 import { blandAltmanAnalysis, calculateDynamicTolerance, batchStatistics } from './statistics.js'
 import { professionalScatterChart, professionalBlandAltmanChart } from './charts-simple.js'
@@ -285,9 +285,9 @@ function ShipView({ ships, ship, onPick, updateShip, onConsult }) {
           <FocChart ship={ship} />
         </div>
         <div className="card mt">
-          <h3>每日油耗歸因 — 成分堆疊（{ship.name} · 近 14 個航行日）</h3>
-          <div className="hint">每根柱＝當日實測 FOC 的組成：乾淨基準 + 風阻 + 吃水 + 船體汙損 + 螺槳；紅色＝船體汙損（本案焦點）</div>
-          <Svg html={stackedFoc(ship)} />
+          <h3>額外油耗歸因 — 成分堆疊（{ship.name} · 近 14 個航行日）</h3>
+          <div className="hint">每根柱＝當日「超出乾淨基準」的額外油耗組成：風阻 + 吃水 + 船體汙損 + 螺槳；紅色＝船體汙損（本案焦點）。hover 看各成分 t/day 與占比</div>
+          <FocAttribution ship={ship} />
         </div>
       </>}
       {tab === 'validate' && (

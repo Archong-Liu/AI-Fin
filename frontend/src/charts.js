@@ -86,64 +86,24 @@ export function attrDonut(ship) {
       <div style="font-size:12px;margin-top:4px">${caption}</div></div>`
 }
 
-// 每日油耗歸因 — 成分堆疊柱狀圖（乾淨基準+風阻+吃水+船體汙損+螺槳＝當日實測 FOC）
-export function stackedFoc(ship) {
+// 額外油耗歸因資料（近 14 個良好天氣航行日）：只拆「超出乾淨基準」的部分，
+// base 僅供 tooltip 對照。繪製在 FocChart.jsx 的 FocAttribution；接真實資料時只換這裡。
+// rnd() 呼叫順序與舊版 stackedFoc 相同，demo 數字不變。
+export function stackedSeries(ship) {
   setSeed(3000 + ship.id)
-  const days = 14, W = 980, H = 330, L = 68, B = 58, T = 42, R = 16
-  const COMP = [
-    ['乾淨基準', 'var(--accent)', '.5'],
-    ['風阻', '#8CA0B2', '.9'],
-    ['吃水', '#B9C7D2', '.9'],
-    ['船體汙損', 'var(--crit)', '.9'],
-    ['螺槳', 'var(--watch)', '.9'],
-  ]
   const extra = ship.penalty
-  const rows = []
-  for (let d = 0; d < days; d++) {
-    rows.push([
-      52 + rnd() * 4 - 2,
-      extra * (0.08 + rnd() * 0.05),
-      extra * (0.06 + rnd() * 0.04),
-      extra * (0.60 + rnd() * 0.12),
-      extra * (0.14 + rnd() * 0.06),
-    ])
-  }
-  const max = Math.max(...rows.map(p => p.reduce((a, b) => a + b, 0))) * 1.1
-  const px = i => L + ((i + 0.5) / days) * (W - L - R)
-  const bw = (W - L - R) / days * 0.58
-  const py = v => T + (1 - v / max) * (H - T - B)
-  let svg = `<text transform="rotate(-90 12 ${(T + H - B) / 2})" x="12" y="${(T + H - B) / 2}" text-anchor="middle"
-    style="fill:var(--muted);font-weight:600">FOC（t/day）</text>`
-  for (let g = 0; g <= 4; g++) {
-    const val = (max / 4) * g, y = py(val)
-    svg += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--chart-grid)"/>
-      <text x="28" y="${y + 4}" style="fill:var(--text);font-weight:600">${val.toFixed(0)}</text>`
-  }
-  rows.forEach((parts, i) => {
-    let cum = 0
-    parts.forEach((v, k) => {
-      const y0 = py(cum + v)
-      svg += `<rect x="${(px(i) - bw / 2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}"
-        height="${(py(cum) - y0).toFixed(1)}" fill="${COMP[k][1]}" opacity="${COMP[k][2]}"/>`
-      cum += v
+  const days = 14, rows = []
+  for (let i = 0; i < days; i++) {
+    rows.push({
+      d: 1825 - (days - 1) + i,
+      base: 52 + rnd() * 4 - 2,
+      wind: extra * (0.08 + rnd() * 0.05),
+      draft: extra * (0.06 + rnd() * 0.04),
+      hull: extra * (0.60 + rnd() * 0.12),
+      prop: extra * (0.14 + rnd() * 0.06),
     })
-  })
-  ;[0, 3, 6, 9, 13].forEach(i => {
-    const day = 1825 - (days - 1) + i
-    const anchor = i === 13 ? 'end' : 'middle'
-    svg += `<line x1="${px(i)}" y1="${H - B}" x2="${px(i)}" y2="${H - B + 5}" stroke="var(--chart-grid)"/>
-      <text x="${px(i)}" y="${H - B + 19}" text-anchor="${anchor}">${dateOf(day)}</text>
-      <text x="${px(i)}" y="${H - B + 34}" text-anchor="${anchor}" style="fill:var(--faint)">D${day}</text>`
-  })
-  let lx = L
-  COMP.forEach(([name, color, op]) => { // 圖例列（左上）
-    svg += `<rect x="${lx}" y="10" width="13" height="13" fill="${color}" opacity="${op}"/>
-      <text x="${lx + 18}" y="21" style="fill:var(--text)">${name}</text>`
-    lx += 18 + name.length * 13 + 26
-  })
-  svg += `<text x="${L + (W - L - R) / 2}" y="${H - 6}" text-anchor="middle"
-    style="fill:var(--muted);font-weight:600">日期（D = 資料起算第幾天）· 近 ${days} 個良好天氣航行日</text>`
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日油耗成分堆疊圖">${svg}</svg>`
+  }
+  return rows
 }
 
 export function scatterChart() {

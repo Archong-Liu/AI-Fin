@@ -4,22 +4,26 @@
 // 資料一律來自 charts.js focSeries()；接真實資料時只換那邊，這裡不動。
 import React, { useEffect, useRef, useState } from 'react'
 import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
+import { LineChart, BarChart } from 'echarts/charts'
 import {
   GridComponent, TooltipComponent, DataZoomComponent, LegendComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { focSeries } from './charts.js'
+import { focSeries, stackedSeries } from './charts.js'
 import { DMAX } from './SlChart.jsx'
 
-echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, CanvasRenderer])
+echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, DataZoomComponent, LegendComponent, CanvasRenderer])
 
 // day index → 時間戳，同 SlChart 的換算（DMAX = 今天）
 const tsOf = d => Date.now() - (DMAX - d) * 86400000
+const fmtDate = ts => {
+  const d = new Date(ts)
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+}
 const OVER = 1.04 // 單日偏高門檻：實測 > 基準 4%（沿用舊柱狀圖紅柱規則）
 const COLOR = {
   grid: '#DCE4EB', muted: '#5A7186', accent: '#1F7BC4', text: '#14273A',
-  crit: '#C74A3E', good: '#1E9E72',
+  crit: '#C74A3E', good: '#1E9E72', watch: '#B97E1E',
 }
 const CURVES = [
   { key: 'base', name: '乾淨基準（乾淨船體）', color: COLOR.accent },
@@ -53,9 +57,7 @@ export default function FocChart({ ship }) {
           const extra = r.act - r.base
           const pct = (r.act / r.base - 1) * 100
           const over = r.act > r.base * OVER
-          const d = new Date(tsOf(r.d))
-          const date = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
-          return `<b>${date}（D${r.d}）</b><br/>` +
+          return `<b>${fmtDate(tsOf(r.d))}（D${r.d}）</b><br/>` +
             `實測 FOC：<b>${r.act.toFixed(1)} t/day</b><br/>` +
             `乾淨基準（模型）：${r.base.toFixed(1)} t/day<br/>` +
             `額外油耗：${extra >= 0 ? '+' : ''}${extra.toFixed(1)} t/day（${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%）<br/>` +
@@ -124,4 +126,70 @@ export default function FocChart({ ship }) {
       </div>
     </div>
   )
+}
+
+/* ---------- 額外油耗歸因 — 只堆疊「超出乾淨基準」的成分 ---------- */
+const PARTS = [
+  { key: 'wind', name: '風阻', color: '#8CA0B2' },
+  { key: 'draft', name: '吃水', color: '#B9C7D2' },
+  { key: 'hull', name: '船體汙損', color: COLOR.crit },
+  { key: 'prop', name: '螺槳', color: COLOR.watch },
+]
+
+export function FocAttribution({ ship }) {
+  const elRef = useRef(null)
+  const chartRef = useRef(null)
+
+  useEffect(() => {
+    if (!elRef.current) return
+    const chart = echarts.init(elRef.current)
+    chartRef.current = chart
+    const rows = stackedSeries(ship)
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 56, right: 24, top: 44, bottom: 28 },
+      legend: { top: 0, left: 48, itemWidth: 14, textStyle: { color: COLOR.text } },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        // 歸因明細：各成分 t/day＋占額外油耗的百分比，乾淨基準只當對照
+        formatter: ps => {
+          const r = rows[ps[0].dataIndex]
+          const tot = PARTS.reduce((s, p) => s + r[p.key], 0)
+          const items = PARTS.map(p =>
+            `<span style="color:${p.color}">●</span> ${p.name}：${r[p.key].toFixed(1)} t/day（${(r[p.key] / tot * 100).toFixed(0)}%）`
+          ).join('<br/>')
+          return `<b>${fmtDate(tsOf(r.d))}（D${r.d}）</b><br/>` +
+            `額外油耗合計：<b>${tot.toFixed(1)} t/day</b>（乾淨基準 ${r.base.toFixed(1)} 的 +${(tot / r.base * 100).toFixed(1)}%）<br/>${items}`
+        },
+      },
+      xAxis: {
+        type: 'time',
+        axisLine: { lineStyle: { color: COLOR.grid } },
+        axisLabel: { color: COLOR.muted },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: 'value', name: '額外油耗（t/day）', nameTextStyle: { color: COLOR.muted },
+        axisLabel: { color: COLOR.muted },
+        splitLine: { lineStyle: { color: COLOR.grid } },
+      },
+      series: PARTS.map(p => ({
+        name: p.name, type: 'bar', stack: 'extra', barWidth: '55%',
+        data: rows.map(r => [tsOf(r.d), r[p.key]]),
+        itemStyle: { color: p.color },
+      })),
+    })
+
+    return () => chart.dispose()
+  }, [ship])
+
+  useEffect(() => {
+    const ro = new ResizeObserver(() => chartRef.current?.resize())
+    ro.observe(elRef.current)
+    return () => ro.disconnect()
+  }, [])
+
+  return <div ref={elRef} style={{ width: '100%', height: 300 }} role="img" aria-label="額外油耗歸因堆疊圖：風阻、吃水、船體汙損、螺槳" />
 }
