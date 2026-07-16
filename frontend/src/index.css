@@ -141,6 +141,12 @@ h2.section:first-child{margin-top:0}
 .modal .actions .primary{border:0;background:var(--accent);color:#fff;padding:10px 20px;font-size:17.4px;font-weight:600}
 .modal .actions .ghost2{border:1px solid var(--line);background:var(--panel);color:var(--muted);padding:10px 16px;font-size:17.4px}
 
+/* ===== 系統架構圖 Modal ===== */
+.modal-img{position:relative;max-width:94vw;max-height:92vh;background:var(--panel);border:1px solid var(--line-soft);box-shadow:var(--shadow);padding:12px}
+.modal-img img{display:block;max-width:100%;max-height:86vh;object-fit:contain}
+.modal-img-close{position:absolute;top:-14px;right:-14px;width:32px;height:32px;border-radius:50%;border:1px solid var(--line-soft);background:var(--panel);color:var(--muted);font-size:20px;line-height:1;box-shadow:var(--shadow)}
+.modal-img-close:hover{color:var(--crit);border-color:var(--crit)}
+
 /* 單船警戒線編輯 */
 .thr-edit span{display:flex;align-items:center;gap:7px;color:var(--muted)}
 .thr-edit input{width:76px;border:1px solid var(--line);padding:7px 10px;font-family:var(--font-data);font-size:18px;background:var(--panel);color:var(--text)}

@@ -816,6 +816,7 @@ function DataView({ ships, meta }) {
   const [aiSummary, setAiSummary] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
   const [notificationState, setNotificationState] = useState('idle')
+  const [showArch, setShowArch] = useState(false)
 
   // ①摘要用真實 Bedrock 呼叫產生（docs/feature-spec.md F4 v0.2），失敗/未設 VITE_API_BASE
   // 就停在 staticSummary（同一組真實數字，只是沒有 AI 潤飾）——與其餘 AI 功能同一套降級邏輯。
@@ -867,6 +868,19 @@ function DataView({ ships, meta }) {
 
   return (
     <div>
+        <h2 className="section">系統架構</h2>
+        <div className="card">
+          <div className="hint">S3 事件驅動 ETL → 推論 Lambda → CloudFront/API Gateway → Bedrock LLM 的整體架構圖</div>
+          <button className="ghost" onClick={() => setShowArch(true)}>查看系統架構圖 →</button>
+        </div>
+        {showArch && (
+          <div className="modal-ov" onClick={() => setShowArch(false)}>
+            <div className="modal-img" onClick={e => e.stopPropagation()}>
+              <button className="modal-img-close" onClick={() => setShowArch(false)} aria-label="關閉">×</button>
+              <img src="/architecture-diagram.png" alt="YMINSIGHT 系統架構圖" />
+            </div>
+          </div>
+        )}
         <h2 className="section">AI 報告</h2>
         <div className="card report-doc">
           <h1>船隊船體能效月報 — D1825</h1>
